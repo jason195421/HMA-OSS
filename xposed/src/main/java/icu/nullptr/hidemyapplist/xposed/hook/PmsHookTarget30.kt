@@ -24,7 +24,7 @@ class PmsHookTarget30(service: HMAService) : PmsHookTargetBase(service) {
         private const val TAG = "PmsHookTarget30"
     }
 
-    override val fakeSystemPackageInstallInfo: Any by lazy {
+    override val fakeSystemPackageInstallSourceInfo: Any by lazy {
         findConstructor(
             "android.content.pm.InstallSourceInfo"
         ) {
@@ -37,14 +37,14 @@ class PmsHookTarget30(service: HMAService) : PmsHookTargetBase(service) {
         )
     }
 
-    override val fakeUserPackageInstallInfo: Any by lazy {
+    override val fakeUserPackageInstallSourceInfo: Any by lazy {
         findConstructor(
             "android.content.pm.InstallSourceInfo"
         ) {
             paramCount == 4
         }.newInstance(
             VENDING_PACKAGE_NAME,
-            psSigningInfo,
+            psPackageInfo?.signingInfo,
             VENDING_PACKAGE_NAME,
             VENDING_PACKAGE_NAME,
         )
@@ -52,38 +52,6 @@ class PmsHookTarget30(service: HMAService) : PmsHookTargetBase(service) {
 
     override fun load() {
         logI(TAG, "Load hook")
-
-        /*
-        findMethodOrNull("com.android.server.pm.PackageManagerService") {
-            name == "checkPermission"
-        }?.hookBefore { param ->
-            val targetApp = param.args[1] as String
-            val callingApps = Utils4Xposed.getCallingApps(service)
-            for (caller in callingApps) {
-                if (service.shouldHide(caller, targetApp)) {
-                    logD(TAG, "@checkPermission - PkgMgr: insecure query from $caller to $targetApp")
-                    param.result = PackageManager.PERMISSION_DENIED
-                    service.filterCount++
-                    return@hookBefore
-                }
-            }
-        }
-
-        findMethodOrNull("com.android.server.pm.permission.PermissionManagerService", findSuper = true) {
-            name == "checkPermission"
-        }?.hookBefore { param ->
-            val targetApp = param.args[1] as String
-            val callingApps = Utils4Xposed.getCallingApps(service)
-            for (caller in callingApps) {
-                if (service.shouldHide(caller, targetApp)) {
-                    logD(TAG, "@checkPermission - PkgMgr: insecure query from $caller to $targetApp")
-                    param.result = PackageManager.PERMISSION_DENIED
-                    service.filterCount++
-                    return@hookBefore
-                }
-            }
-        }
-         */
 
         findMethodOrNull("com.android.server.pm.PackageManagerService", findSuper = true) {
             name == "getPackageSetting"

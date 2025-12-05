@@ -75,4 +75,14 @@
         <item>@string/app_force_stop_launch</item>
         <item>@string/app_launch</item>
     </string-array>
+
+    <string-array name="settings_template_inner_action_texts" translatable="false">
+        <item>@string/edit</item>
+        <item>@string/delete</item>
+    </string-array>
+
+    <string-array name="settings_template_inner_add_texts" translatable="false">
+        <item>@string/settings_templates_custom</item>
+        <item>@string/settings_templates_random_ssaid</item>
+    </string-array>
 </resources>

@@ -9,11 +9,13 @@ import android.view.WindowInsets
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.net.toUri
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.flowWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceDataStore
 import androidx.preference.PreferenceFragmentCompat
+import androidx.preference.SeekBarPreference
 import androidx.preference.SwitchPreferenceCompat
 import by.kirich1409.viewbindingdelegate.viewBinding
 import com.google.android.material.color.DynamicColors
@@ -30,10 +32,14 @@ import icu.nullptr.hidemyapplist.ui.util.setupToolbar
 import icu.nullptr.hidemyapplist.ui.util.showToast
 import icu.nullptr.hidemyapplist.util.ConfigUtils.Companion.getLocale
 import icu.nullptr.hidemyapplist.util.LangList
+import icu.nullptr.hidemyapplist.util.PackageHelper.findEnabledAppComponent
 import icu.nullptr.hidemyapplist.util.SuUtils
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.frknkrc44.hma_oss.R
 import org.frknkrc44.hma_oss.databinding.FragmentSettingsBinding
+import org.frknkrc44.hma_oss.ui.activity.BaseActivity
+import org.frknkrc44.hma_oss.ui.preference.AppIconPreference
 import java.util.Locale
 
 class SettingsFragment : Fragment(R.layout.fragment_settings), PreferenceFragmentCompat.OnPreferenceStartFragmentCallback {
@@ -51,6 +57,10 @@ class SettingsFragment : Fragment(R.layout.fragment_settings), PreferenceFragmen
             // isTitleCentered = true
         }
 
+        runBlocking {
+            PrefManager.isLauncherIconInvisible.emit(findEnabledAppComponent(hmaApp) == null)
+        }
+
         if (childFragmentManager.findFragmentById(R.id.settings_container) == null) {
             childFragmentManager.beginTransaction()
                 .replace(R.id.settings_container, SettingsPreferenceFragment())
@@ -60,7 +70,7 @@ class SettingsFragment : Fragment(R.layout.fragment_settings), PreferenceFragmen
         binding.root.setOnApplyWindowInsetsListener { v, insets ->
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val barInsets = insets.getInsets(WindowInsets.Type.systemBars())
-                binding.root.setPadding(
+                v.setPadding(
                     barInsets.left,
                     barInsets.top,
                     barInsets.right,
@@ -68,7 +78,7 @@ class SettingsFragment : Fragment(R.layout.fragment_settings), PreferenceFragmen
                 )
             } else {
                 @Suppress("deprecation")
-                binding.root.setPadding(
+                v.setPadding(
                     insets.systemWindowInsetLeft,
                     insets.systemWindowInsetTop,
                     insets.systemWindowInsetRight,
@@ -104,6 +114,7 @@ class SettingsFragment : Fragment(R.layout.fragment_settings), PreferenceFragmen
                 "skipSystemAppDataIsolation" -> ConfigManager.skipSystemAppDataIsolation
                 "disableActivityLaunchProtection" -> ConfigManager.disableActivityLaunchProtection
                 "forceMountData" -> ConfigManager.forceMountData
+                "packageQueryWorkaround" -> ConfigManager.packageQueryWorkaround
                 else -> throw IllegalArgumentException("Invalid key: $key")
             }
         }
@@ -114,6 +125,13 @@ class SettingsFragment : Fragment(R.layout.fragment_settings), PreferenceFragmen
                 "themeColor" -> PrefManager.themeColor
                 "darkTheme" -> PrefManager.darkTheme.toString()
                 "maxLogSize" -> ConfigManager.maxLogSize.toString()
+                else -> throw IllegalArgumentException("Invalid key: $key")
+            }
+        }
+
+        override fun getInt(key: String, defValue: Int): Int {
+            return when (key) {
+                "systemWallpaperAlpha" -> PrefManager.systemWallpaperAlpha
                 else -> throw IllegalArgumentException("Invalid key: $key")
             }
         }
@@ -131,6 +149,7 @@ class SettingsFragment : Fragment(R.layout.fragment_settings), PreferenceFragmen
                 "appDataIsolation" -> ConfigManager.altAppDataIsolation = value
                 "voldAppDataIsolation" -> ConfigManager.altVoldAppDataIsolation = value
                 "skipSystemAppDataIsolation" -> ConfigManager.skipSystemAppDataIsolation = value
+                "packageQueryWorkaround" -> ConfigManager.packageQueryWorkaround = value
                 else -> throw IllegalArgumentException("Invalid key: $key")
             }
         }
@@ -141,6 +160,13 @@ class SettingsFragment : Fragment(R.layout.fragment_settings), PreferenceFragmen
                 "themeColor" -> PrefManager.themeColor = value!!
                 "darkTheme" -> PrefManager.darkTheme = value!!.toInt()
                 "maxLogSize" -> ConfigManager.maxLogSize = value!!.toInt()
+                else -> throw IllegalArgumentException("Invalid key: $key")
+            }
+        }
+
+        override fun putInt(key: String, value: Int) {
+            when (key) {
+                "systemWallpaperAlpha" -> PrefManager.systemWallpaperAlpha = value
                 else -> throw IllegalArgumentException("Invalid key: $key")
             }
         }
@@ -289,6 +315,24 @@ class SettingsFragment : Fragment(R.layout.fragment_settings), PreferenceFragmen
                 }
             }
 
+            findPreference<SeekBarPreference>("systemWallpaperAlpha")?.apply {
+                setOnPreferenceChangeListener { _, value ->
+                    (requireActivity() as BaseActivity).applyWallpaperBackgroundColor(value as Int)
+
+                    true
+                }
+            }
+
+            lifecycleScope.launch {
+                PrefManager.isLauncherIconInvisible
+                    .flowWithLifecycle(lifecycle)
+                    .collect { _ ->
+                        findPreference<AppIconPreference>("launcherIcon")?.apply {
+                            updateHolder()
+                        }
+                    }
+            }
+
             findPreference<Preference>("clearUninstalledPackageConfigs")?.apply {
                 setOnPreferenceClickListener {
                     MaterialAlertDialogBuilder(requireContext())
@@ -313,9 +357,7 @@ class SettingsFragment : Fragment(R.layout.fragment_settings), PreferenceFragmen
                                 }
                             }
                         }
-                        .setNegativeButton(android.R.string.cancel) { _, _ ->
-                            // do nothing
-                        }
+                        .setNegativeButton(android.R.string.cancel, null)
                         .setCancelable(false)
                         .show()
 

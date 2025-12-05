@@ -1,18 +1,27 @@
 package icu.nullptr.hidemyapplist.util
 
+import android.content.ComponentName
+import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.content.pm.PackageManager
+import android.graphics.drawable.Drawable
+import androidx.core.graphics.drawable.toDrawable
 import icu.nullptr.hidemyapplist.common.Constants
 import icu.nullptr.hidemyapplist.hmaApp
+import icu.nullptr.hidemyapplist.service.ConfigManager
 import icu.nullptr.hidemyapplist.service.PrefManager
+import icu.nullptr.hidemyapplist.service.ServiceClient
+import icu.nullptr.hidemyapplist.ui.util.ThemeUtils.asDrawable
+import icu.nullptr.hidemyapplist.ui.util.asComponentName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import org.frknkrc44.hma_oss.BuildConfig
+import org.frknkrc44.hma_oss.R
 import java.text.Collator
 import java.util.Locale
 
@@ -20,7 +29,7 @@ object PackageHelper {
     class PackageCache(
         val info: PackageInfo,
         val label: String,
-        val icon: Bitmap
+        val icon: Drawable
     )
 
     object Comparators {
@@ -74,14 +83,30 @@ object PackageHelper {
             isRefreshing.emit(true)
             val cache = withContext(Dispatchers.IO) {
                 val pm = hmaApp.packageManager
-                val packages = pm.getInstalledPackages(0)
-                mutableMapOf<String, PackageCache>().also {
-                    for (packageInfo in packages) {
-                        if (packageInfo.packageName in Constants.packagesShouldNotHide) continue
-                        packageInfo.applicationInfo?.let { appInfo ->
-                            val label = pm.getApplicationLabel(appInfo).toString()
-                            val icon = hmaApp.appIconLoader.loadIcon(appInfo)
-                            it[packageInfo.packageName] = PackageCache(packageInfo, label, icon)
+
+                if (ConfigManager.packageQueryWorkaround) {
+                    val packages = ServiceClient.getPackageNames(0) ?: arrayOf<String>()
+                    mutableMapOf<String, PackageCache>().also {
+                        for (packageName in packages) {
+                            val packageInfo = ServiceClient.getPackageInfo(packageName, 0)!!
+                            if (packageInfo.packageName in Constants.packagesShouldNotHide) continue
+                            packageInfo.applicationInfo?.let { appInfo ->
+                                val label = pm.getApplicationLabel(appInfo).toString()
+                                val icon = loadAppIconFromAppInfo(appInfo)
+                                it[packageInfo.packageName] = PackageCache(packageInfo, label, icon)
+                            }
+                        }
+                    }
+                } else {
+                    val packages = pm.getInstalledPackages(0)
+                    mutableMapOf<String, PackageCache>().also {
+                        for (packageInfo in packages) {
+                            if (packageInfo.packageName in Constants.packagesShouldNotHide) continue
+                            packageInfo.applicationInfo?.let { appInfo ->
+                                val label = pm.getApplicationLabel(appInfo).toString()
+                                val icon = loadAppIconFromAppInfo(appInfo)
+                                it[packageInfo.packageName] = PackageCache(packageInfo, label, icon)
+                            }
                         }
                     }
                 }
@@ -126,15 +151,33 @@ object PackageHelper {
         getCacheNoThrow()[packageName]?.label ?: packageName
     }
 
-    fun loadAppIcon(packageName: String): Bitmap = runBlocking {
+    fun loadAppIcon(packageName: String): Drawable = runBlocking {
         getCacheNoThrow()[packageName]?.icon ?:
-            BitmapFactory.decodeResource(
-                hmaApp.resources,
-                android.R.drawable.sym_def_app_icon
-            )
+            android.R.drawable.sym_def_app_icon.asDrawable(hmaApp)
     }
 
     fun isSystem(packageName: String): Boolean = runBlocking {
         getCacheNoThrow()[packageName]?.info?.applicationInfo?.flags?.and(ApplicationInfo.FLAG_SYSTEM) != 0
+    }
+
+    fun loadAppIconFromAppInfo(appInfo: ApplicationInfo): Drawable {
+        return if (appInfo.packageName == BuildConfig.APPLICATION_ID) {
+            val activityName = findEnabledAppComponent(hmaApp)
+            if (activityName == null) {
+                R.mipmap.ic_launcher.asDrawable(hmaApp)
+            } else {
+                hmaApp.packageManager.getActivityIcon(activityName)
+            }
+        } else {
+            hmaApp.appIconLoader.loadIcon(appInfo).toDrawable(hmaApp.resources)
+        }
+    }
+
+    fun findEnabledAppComponent(context: Context): ComponentName? {
+        with (context.packageManager) {
+            val pkgInfo =  getPackageInfo(BuildConfig.APPLICATION_ID, PackageManager.GET_ACTIVITIES)!!
+
+            return pkgInfo.activities?.firstOrNull { it.targetActivity != null }?.asComponentName()
+        }
     }
 }
