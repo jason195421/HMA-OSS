@@ -29,7 +29,23 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 0
 
-      - name: 核心修复+子模块配置校验（决胜版）
+      - name: 配置 Android SDK（全组件安装）
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          build-tools: 34.0.0
+          ndk-version: 26.1.10909125
+          cmake-version: 3.22.1
+          components: |
+            platform-tools
+            tools
+            build-tools;34.0.0
+            platforms;android-34
+            ndk;26.1.10909125
+            extras;android;m2repository
+            extras;google;m2repository
+
+      - name: 终极闭环修复（子模块路径+根项目配置）
         shell: bash
         run: |
           set +e
@@ -37,25 +53,49 @@ jobs:
           ROOT_GRADLE_KTS="build.gradle.kts"
           SETTINGS_GRADLE_KTS="settings.gradle.kts"
 
-          # 1. 校验并修复 settings.gradle.kts（确保子模块被识别）
+          # 1. 自动检测子模块路径并配置 settings.gradle.kts（关键修复）
           chmod +w "$SETTINGS_GRADLE_KTS" 2>/dev/null || true
-          # 检查是否包含子模块配置，缺失则添加
-          if ! grep -q 'include(":common")' "$SETTINGS_GRADLE_KTS"; then
-            echo 'include(":common")' >> "$SETTINGS_GRADLE_KTS"
-            echo "⚠️  已添加 common 模块到 settings.gradle.kts"
-          fi
-          if ! grep -q 'include(":xposed")' "$SETTINGS_GRADLE_KTS"; then
-            echo 'include(":xposed")' >> "$SETTINGS_GRADLE_KTS"
-            echo "⚠️  已添加 xposed 模块到 settings.gradle.kts"
-          fi
-          # 验证子模块路径（若子模块在子目录，需指定projectDir）
-          echo "=== settings.gradle.kts 内容 ==="
-          cat "$SETTINGS_GRADLE_KTS" 2>/dev/null
+          # 清空原有子模块配置，重新自动生成
+          sed -i '/include(":common")/d' "$SETTINGS_GRADLE_KTS"
+          sed -i '/include(":xposed")/d' "$SETTINGS_GRADLE_KTS"
+          sed -i '/project(":common").projectDir/d' "$SETTINGS_GRADLE_KTS"
+          sed -i '/project(":xposed").projectDir/d' "$SETTINGS_GRADLE_KTS"
 
-          # 2. 提取包名+注入属性（保留之前的正确修复）
+          # 自动查找 common/xposed 模块的真实路径
+          COMMON_PATH=$(find . -type d -name "common" | grep -E "/common$" | head -1)
+          XPOSED_PATH=$(find . -type d -name "xposed" | grep -E "/xposed$" | head -1)
+
+          # 添加子模块配置（含路径）
+          if [ -n "$COMMON_PATH" ]; then
+            echo 'include(":common")' >> "$SETTINGS_GRADLE_KTS"
+            echo "project(":common").projectDir = file(\"$COMMON_PATH\")" >> "$SETTINGS_GRADLE_KTS"
+            echo "✅ 自动配置 common 模块路径：$COMMON_PATH"
+          else
+            echo "❌ 未找到 common 模块，编译可能失败"
+          fi
+
+          if [ -n "$XPOSED_PATH" ]; then
+            echo 'include(":xposed")' >> "$SETTINGS_GRADLE_KTS"
+            echo "project(":xposed").projectDir = file(\"$XPOSED_PATH\")" >> "$SETTINGS_GRADLE_KTS"
+            echo "✅ 自动配置 xposed 模块路径：$XPOSED_PATH"
+          else
+            echo "❌ 未找到 xposed 模块，编译可能失败"
+          fi
+
+          # 2. 根项目添加 Android 统一配置（子模块继承）
+          chmod +w "$ROOT_GRADLE_KTS" 2>/dev/null || true
+          if ! grep -q 'alias(libs.plugins.agp.library)' "$ROOT_GRADLE_KTS"; then
+            # 在根项目 plugins 块添加 Android 库插件（子模块依赖）
+            sed -i '/plugins {/a \
+              alias(libs.plugins.agp.library) apply false\
+              alias(libs.plugins.kotlin.android) apply false\
+              alias(libs.plugins.kotlin.jvm) apply false\
+            ' "$ROOT_GRADLE_KTS"
+          fi
+
+          # 3. 注入 rootProject.extra 属性（保留正确逻辑）
           REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
           REAL_PACKAGE=${REAL_PACKAGE:-"com.frknkrc44.hma"}
-          chmod +w "$ROOT_GRADLE_KTS" 2>/dev/null || true
           sed -i '/rootProject.extra {/,/}/d' "$ROOT_GRADLE_KTS"
           sed -i '1i \
           rootProject.extra { \
@@ -67,26 +107,45 @@ jobs:
           }\
           ' "$ROOT_GRADLE_KTS"
 
-          # 3. 清理所有模块的 Crowdin 残留（包括子模块）
-          for MODULE in app common xposed; do
+          # 4. 全模块清理+Toolchain 同步
+          for MODULE in app "$COMMON_PATH" "$XPOSED_PATH"; do
+            [ -z "$MODULE" ] && continue
             MODULE_GRADLE="$MODULE/build.gradle.kts"
             if [ -f "$MODULE_GRADLE" ]; then
               chmod +w "$MODULE_GRADLE" 2>/dev/null || true
               sed -i '/crowdin/d' "$MODULE_GRADLE"
-              sed -i '/URL(/d; /HttpURLConnection/d; /DataInputStream/d' "$MODULE_GRADLE"
               sed -i 's/jvmToolchain(17)/jvmToolchain(21)/g' "$MODULE_GRADLE" 2>/dev/null
-              echo "✅ 清理 $MODULE 模块 Crowdin 残留"
+              # 子模块添加 Android 配置继承（若缺失）
+              if ! grep -q 'android {' "$MODULE_GRADLE"; then
+                echo '
+                android {
+                    namespace = "'"$REAL_PACKAGE"'.'"$(basename "$MODULE")"'"
+                    compileSdk = 34
+                    defaultConfig {
+                        minSdk = 24
+                    }
+                    compileOptions {
+                        sourceCompatibility = JavaVersion.VERSION_21
+                        targetCompatibility = JavaVersion.VERSION_21
+                    }
+                    kotlinOptions {
+                        jvmTarget = "21"
+                    }
+                }
+                ' >> "$MODULE_GRADLE"
+              fi
             fi
           done
 
-          # 4. 验证子模块目录结构
-          echo "=== 项目完整目录结构 ==="
-          find . -maxdepth 2 -type d | grep -E "(app|common|xposed)"
-          echo "=== app 模块依赖配置 ==="
-          grep -n "implementation(projects." "$APP_GRADLE_KTS" 2>/dev/null
+          # 5. 验证配置结果
+          echo "=== 最终 settings.gradle.kts 配置 ==="
+          cat "$SETTINGS_GRADLE_KTS" 2>/dev/null
+          echo "=== 子模块路径验证 ==="
+          [ -n "$COMMON_PATH" ] && ls -la "$COMMON_PATH" 2>/dev/null || echo "common 模块缺失"
+          [ -n "$XPOSED_PATH" ] && ls -la "$XPOSED_PATH" 2>/dev/null || echo "xposed 模块缺失"
 
           set -e
-          echo "=== 所有修复+校验完成 ==="
+          echo "=== 闭环修复完成 ==="
 
       - name: Gradle wrapper validation
         uses: gradle/wrapper-validation-action@v3
@@ -102,52 +161,49 @@ jobs:
         run: |
           echo officialBuild=false >> local.properties
 
-      - name: Cache gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/settings.gradle.kts') }}
-          restore-keys: ${{ runner.os }}-gradle-
-
-      - name: Gradle prebuild（指定子模块先编译）
+      - name: 全缓存清理（彻底解决缓存污染）
         run: |
-          ./gradlew :common:prebuild :xposed:prebuild :app:prebuild --no-daemon --info
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          JAVA_OPTS: "-Xmx4g"
+          rm -rf ~/.gradle/caches/*
+          rm -rf ~/.gradle/wrapper/*
+          rm -rf app/build/
+          rm -rf common/build/ 2>/dev/null
+          rm -rf xposed/build/ 2>/dev/null
+          echo "✅ 已清理所有 Gradle 缓存和构建产物"
 
-      - name: Build all（精准指定任务，避免歧义）
+      - name: 编译前验证子模块
+        run: |
+          ./gradlew projects --no-daemon | grep -E "(Root project|Project ':common'|Project ':xposed')" || true
+          ./gradlew :common:tasks --no-daemon | grep "compileKotlin" 2>/dev/null || echo "common 模块无 compileKotlin 任务"
+          ./gradlew :xposed:tasks --no-daemon | grep "compileKotlin" 2>/dev/null || echo "xposed 模块无 compileKotlin 任务"
+
+      - name: Build all（最终稳定版）
         id: buildAll
         run: |
-          # 明确指定 Debug/Release 任务，替代模糊的 assemble
-          ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace --info
-          # 提取 APK 路径（兼容不同输出结构）
-          RELEASE_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
-          DEBUG_FILE=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
-          echo "releaseName=$(basename "$RELEASE_FILE")" >> $GITHUB_OUTPUT
-          echo "debugName=$(basename "$DEBUG_FILE")" >> $GITHUB_OUTPUT
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          ./gradlew :common:assemble :xposed:assemble :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace --info
+          # 安全提取 APK 路径
+          RELEASE_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -1 || echo "")
+          DEBUG_FILE=$(find app/build/outputs/apk/debug -name "*.apk" | head -1 || echo "")
+          echo "releaseName=$(basename "$RELEASE_FILE" 2>/dev/null)" >> $GITHUB_OUTPUT
+          echo "debugName=$(basename "$DEBUG_FILE" 2>/dev/null)" >> $GITHUB_OUTPUT
           echo "releaseFile=$RELEASE_FILE" >> $GITHUB_OUTPUT
           echo "debugFile=$DEBUG_FILE" >> $GITHUB_OUTPUT
-          echo "ossNum=$(basename "$DEBUG_FILE" | awk -F '-' '{print $4}' | sed 's/.apk//')" >> $GITHUB_OUTPUT
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          JAVA_OPTS: "-Xmx4g"
+          echo "ossNum=$(basename "$DEBUG_FILE" 2>/dev/null | awk -F '-' '{print $4}' | sed 's/.apk//' 2>/dev/null)" >> $GITHUB_OUTPUT
 
-      - name: 终极排障日志（失败必看）
+      - name: 终极排障日志（最后一次）
         if: failure()
         run: |
-          echo "=== 子模块识别状态 ==="
-          ./gradlew projects --no-daemon | grep -E "(Root project|Project ':common'|Project ':xposed')"
-          echo "=== 可用任务列表（app模块）==="
-          ./gradlew :app:tasks --no-daemon | grep -E "assemble|build"
+          echo "=== 环境变量验证 ==="
+          env | grep -E "ANDROID|JAVA" | sort
           echo "=== 子模块编译日志（common）==="
-          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E ":common:.*(error|fail)" | tail -50
+          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E ":common:.*(ERROR|Failed)" | tail -100
           echo "=== 子模块编译日志（xposed）==="
-          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E ":xposed:.*(error|fail)" | tail -50
-          echo "=== 依赖冲突日志 ==="
-          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E "conflict|duplicate" | tail -50
+          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E ":xposed:.*(ERROR|Failed)" | tail -100
+          echo "=== app 模块编译日志 ==="
+          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E ":app:.*(ERROR|Failed)" | tail -100
+          echo "=== 依赖下载日志 ==="
+          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E "Download|Failed to download" | tail -50
 
       - name: Upload Release APK
         if: success() && steps.buildAll.outputs.releaseFile != ''
