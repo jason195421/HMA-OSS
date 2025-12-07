@@ -10,45 +10,63 @@ jobs:
   build-all:
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取代码（含子模块）
+      - name: 拉取主项目代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           lfs: false
-          submodules: true
-          submodules-depth: 1
-          # 强制同步子模块（解决 common/xposed 模块缺失问题）
-          fetch-submodules: recursive
+          submodules: false # 先拉主项目，再手动处理子模块（避免递归失败）
 
-      - name: 配置 JDK 17（匹配 Toolchain 17）
+      - name: 手动同步子模块（增强稳定性）
+        shell: bash
+        run: |
+          echo "=== 手动同步子模块 ==="
+          git submodule update --init --recursive || {
+            echo "⚠️  子模块同步失败，重试一次"
+            git submodule update --init --recursive # 重试机制
+          }
+          # 验证子模块存在
+          echo "=== 子模块状态 ==="
+          git submodule status
+          echo "=== 子模块目录结构 ==="
+          ls -la common/ 2>/dev/null || { echo "❌ common 模块缺失"; exit 1; }
+          ls -la xposed/ 2>/dev/null || { echo "❌ xposed 模块缺失"; exit 1; }
+          echo "✅ 子模块拉取完成"
+
+      - name: 配置 JDK 17（严格匹配 Toolchain）
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: gradle
+          cache-dependency-path: '**/*.gradle*' # 缓存所有模块依赖
 
-      - name: 配置 Android SDK
+      - name: 配置 Android SDK（指定 NDK 版本兼容）
         uses: android-actions/setup-android@v3
         with:
           api-level: 34
           build-tools: 34.0.0
-          ndk-version: 26.1.10909125
+          ndk-version: 26.1.10909125 # 明确指定 NDK 版本，与配置一致
           cmake-version: 3.22.1
-          components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
+          components: |
+            platform-tools
+            tools
+            extras;android;m2repository
+            extras;google;m2repository
+            ndk;26.1.10909125 # 确保 NDK 完整安装
 
-      - name: 根治核心问题（多模块+JVM+代码残留）
+      - name: 根治代码层面问题（最终版）
         shell: bash
         run: |
           set +e
           APP_GRADLE_KTS="app/build.gradle.kts"
           ROOT_GRADLE_KTS="build.gradle.kts"
 
-          # 1. 提取真实包名（从 app 模块 namespace）
+          # 1. 提取真实包名
           REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
           REAL_PACKAGE=${REAL_PACKAGE:-"com.frknkrc44.hma"}
-          echo "✅ 真实包名：$REAL_PACKAGE"
 
-          # 2. 根项目：注入 rootProject.extra（完全匹配代码）
+          # 2. 根项目注入 rootProject.extra
           chmod +w "$ROOT_GRADLE_KTS" 2>/dev/null || true
           sed -i '/rootProject.extra {/,/}/d' "$ROOT_GRADLE_KTS"
           sed -i '1i \
@@ -61,80 +79,63 @@ jobs:
           }\
           ' "$ROOT_GRADLE_KTS"
 
-          # 3. app 模块：彻底清理 Crowdin 相关代码（避免残留语法）
+          # 3. app 模块清理残留代码
           chmod +w "$APP_GRADLE_KTS" 2>/dev/null || true
-          # 精准删除 Crowdin API 调用块（含 if 条件）
           sed -i '/if (localBuild || officialBuild) {/,/}/d' "$APP_GRADLE_KTS"
-          # 删除 translatorsMap 定义（无 API 调用则无用）
           sed -i '/val translatorsMap = mutableMapOf(/,/)/d' "$APP_GRADLE_KTS"
-          # 清理空行和多余导入
-          sed -i '/^[[:space:]]*$/d' "$APP_GRADLE_KTS"
           sed -i '/import org.jose4j.json.internal.json_simple.JSONObject/d' "$APP_GRADLE_KTS"
           sed -i '/import java.io.DataInputStream/d' "$APP_GRADLE_KTS"
           sed -i '/import java.net.HttpURLConnection/d' "$APP_GRADLE_KTS"
           sed -i '/import java.net.URL/d' "$APP_GRADLE_KTS"
-
-          # 4. 修复 JVM Toolchain 版本不兼容（JDK 17 → Toolchain 17）
           sed -i 's/jvmToolchain(21)/jvmToolchain(17)/g' "$APP_GRADLE_KTS"
-          echo "✅ 已将 Kotlin JVM Toolchain 从 21 改为 17（匹配 JDK 17）"
+          sed -i '/^[[:space:]]*$/d' "$APP_GRADLE_KTS"
 
-          # 5. 验证子模块存在（common/xposed）
-          echo "=== 项目模块结构 ==="
-          ls -la || true
-          ls -la common/ 2>/dev/null || echo "⚠️ common 模块缺失"
-          ls -la xposed/ 2>/dev/null || echo "⚠️ xposed 模块缺失"
-
-          # 6. 根项目：最终语法清理
-          sed -i '/@Suppress/d' "$ROOT_GRADLE_KTS"
-          sed -i '/tasks.whenTaskAdded/d' "$ROOT_GRADLE_KTS"
-          OPEN_BRACES=$(grep -o "{" "$ROOT_GRADLE_KTS" | wc -l)
-          CLOSE_BRACES=$(grep -o "}" "$ROOT_GRADLE_KTS" | wc -l)
-          [ $CLOSE_BRACES -gt $OPEN_BRACES ] && sed -i '$!N;$!N;/}\n*$/!P;D' "$ROOT_GRADLE_KTS"
-          echo 'tasks.whenTaskAdded { if (name.lowercase().contains("crowdin")) enabled = false }' >> "$ROOT_GRADLE_KTS"
+          # 4. 子模块编译配置校验（确保子模块使用相同 JDK）
+          for MODULE in common xposed; do
+            MODULE_GRADLE="$MODULE/build.gradle.kts"
+            if [ -f "$MODULE_GRADLE" ]; then
+              sed -i 's/jvmToolchain(21)/jvmToolchain(17)/g' "$MODULE_GRADLE" 2>/dev/null
+              echo "✅ 已同步 $MODULE 模块 JVM Toolchain 为 17"
+            fi
+          done
 
           set -e
-          echo "=== 所有问题修复完成 ==="
+          echo "=== 代码清理完成 ==="
 
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew 2>/dev/null || true
         shell: bash
 
-      - name: 清理缓存
-        run: ./gradlew clean --no-daemon 2>/dev/null || true
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+      - name: 清理 Gradle 缓存（解决依赖污染）
+        run: |
+          rm -rf ~/.gradle/caches/modules-2/files-2.1/*
+          rm -rf ~/.gradle/caches/transforms-3/
+          echo "✅ 已清理 Gradle 依赖缓存"
 
-      - name: 编译（带依赖校验）
-        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --info
+      - name: 编译（输出子模块详细日志）
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --info --warning-mode=fail
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           JAVA_OPTS: "-Xmx4g"
+          # 强制子模块编译日志输出
+          GRADLE_OPTS: "-Dorg.gradle.debug=false -Dorg.gradle.console=plain"
         shell: bash
 
-      - name: 捕获最终错误日志
+      - name: 捕获终极排障日志
         if: failure()
         run: |
-          echo "=== 子模块详情 ==="
-          git submodule status || true
-          echo "=== 依赖错误详情 ==="
-          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | grep -E "could not find|missing|unsatisfied|Toolchain" | tail -50
-          echo "=== app 模块最终代码片段 ==="
-          sed -n '30,60p' "$APP_GRADLE_KTS" 2>/dev/null
+          echo "=== 子模块完整状态 ==="
+          git submodule status --recursive
+          echo "=== common 模块编译日志 ==="
+          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | grep -E ":common:|common/" | tail -100
+          echo "=== xposed 模块编译日志 ==="
+          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | grep -E ":xposed:|xposed/" | tail -100
+          echo "=== 依赖缺失错误 ==="
+          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | grep -E "could not find|missing|unsatisfied" | tail -50
+          echo "=== Android SDK/NDK 状态 ==="
+          sdkmanager --list | grep -E "ndk|build-tools|platforms;android-34"
         shell: bash
 
-      - name: 上传 APK 产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: HMA-OSS-APKs
-          path: '**/apk/**/*.apk'
-          retention-days: 30
-
-      - name: 上传混淆映射文件
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: HMA-OSS-Proguard-Mapping
-          path: '**/mapping/release/mapping.txt'
-          retention-days: 30
+      - name: 上传 APK 产物（若生成）
+      
