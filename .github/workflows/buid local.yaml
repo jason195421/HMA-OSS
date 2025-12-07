@@ -34,86 +34,113 @@ jobs:
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
 
-      - name: 彻底移除 Crowdin 插件及配置（核心修复）
+      - name: 自动检测包名 + 清理 Crowdin（核心修复）
         shell: bash
         run: |
           set +e
-          echo "=== 彻底清理 Crowdin 相关内容 ==="
+          echo "=== 自动检测项目真实包名 ==="
 
-          # 1. 授权所有 Gradle 文件可修改
-          find . -name "build.gradle*" -type f | xargs chmod +w 2>/dev/null || true
+          # 1. 授权文件可修改
+          find . -name "build.gradle*" -o -name "gradle.properties" | xargs chmod +w 2>/dev/null || true
 
-          # 2. 彻底删除所有 Gradle 文件中的 Crowdin 插件引用（不只是注释）
+          # 2. 自动提取 app/build.gradle.kts 中的 namespace（真实包名）
+          APP_GRADLE_KTS="app/build.gradle.kts"
+          DEFAULT_PACKAGE="com.frknkrc44.hma"
+          REAL_PACKAGE=""
+
+          if [ -f "$APP_GRADLE_KTS" ]; then
+            # 从 android { namespace "xxx" } 中提取包名（适配 KTS 语法）
+            REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
+          fi
+
+          # 3. 验证包名（提取失败则用默认值）
+          if [ -n "$REAL_PACKAGE" ] && [[ "$REAL_PACKAGE" =~ ^[a-zA-Z0-9.]+$ ]]; then
+            echo "✅ 成功提取真实包名：$REAL_PACKAGE"
+          else
+            echo "⚠️  未提取到包名，使用默认包名：$DEFAULT_PACKAGE"
+            REAL_PACKAGE="$DEFAULT_PACKAGE"
+          fi
+
+          # 4. 彻底清理 Crowdin 相关内容
           find . -name "build.gradle*" -type f | while read -r FILE; do
-            # 匹配所有 Crowdin 插件 ID（常见：com.crowdin.gradle、com.crowdin.platform 等）
             sed -i '/id.*crowdin.*/d' "$FILE"
-            # 删除 Crowdin 依赖
             sed -i '/implementation.*crowdin.*/d' "$FILE"
-            # 删除 Crowdin 配置块
             sed -i '/crowdin {/,/}/d' "$FILE"
-            echo "已清理 $FILE 中的 Crowdin 相关内容"
+            sed -i '/crowdin/d' "$FILE"
           done
+          find . -name "gradle.properties" -type f | xargs sed -i '/crowdin/d' 2>/dev/null || true
 
-          # 3. 删除 gradle.properties 中的 Crowdin 配置（若有）
-          if [ -f "gradle.properties" ]; then
-            sed -i '/crowdin/d' gradle.properties
-            echo "已清理 gradle.properties 中的 Crowdin 配置"
+          # 5. 双保险定义 appPackageName（用真实包名）
+          APP_GRADLE_PROP="app/gradle.properties"
+          # 写入 gradle.properties（全局可访问）
+          if [ -f "$APP_GRADLE_PROP" ]; then
+            echo "appPackageName=$REAL_PACKAGE" >> "$APP_GRADLE_PROP"
+          else
+            mkdir -p app && echo "appPackageName=$REAL_PACKAGE" > "$APP_GRADLE_PROP"
           fi
-          if [ -f "app/gradle.properties" ]; then
-            sed -i '/crowdin/d' app/gradle.properties
-            echo "已清理 app/gradle.properties 中的 Crowdin 配置"
+          echo "✅ 已在 $APP_GRADLE_PROP 定义 appPackageName=$REAL_PACKAGE"
+
+          # 写入 app/build.gradle.kts 的 android 块内（精准作用域）
+          if [ -f "$APP_GRADLE_KTS" ]; then
+            sed -i '/android {/a \
+              extra["appPackageName"] = project.findProperty("appPackageName") as String\
+            ' "$APP_GRADLE_KTS"
+            echo "✅ 已在 $APP_GRADLE_KTS 的 android 块内定义属性"
           fi
 
-          # 4. 禁用所有 Crowdin 相关 Gradle 任务（强制阻止执行）
-          echo "
-          // 强制禁用 Crowdin 所有任务
-          tasks.whenTaskAdded { task ->
-              if (task.name.contains('crowdin') || task.class.name.contains('crowdin')) {
-                  task.enabled = false
-                  println('Disabled Crowdin task: ' + task.name)
-              }
-          }
-          " >> build.gradle 2>/dev/null || echo "根目录 build.gradle 不存在，跳过任务禁用"
+          # 6. 禁用 Crowdin 任务
+          ROOT_GRADLE=$(find . -maxdepth 1 -name "build.gradle*" | head -1)
+          if [ -n "$ROOT_GRADLE" ]; then
+            echo '
+            tasks.whenTaskAdded {
+                if (name.contains("crowdin") || className.contains("crowdin")) enabled = false
+            }
+            ' >> "$ROOT_GRADLE"
+          fi
 
           set -e
-          echo "=== Crowdin 清理完成 ==="
+          echo "=== 包名配置完成 ==="
 
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew 2>/dev/null || true
         shell: bash
 
-      - name: 清理缓存（排除 Crowdin 任务）
+      - name: 清理缓存
         run: ./gradlew clean --no-daemon -x :crowdinSync -x :app:crowdinSync 2>/dev/null || true
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: 编译 Debug + Release（明确排除 Crowdin 任务）
+      - name: 编译 Debug + Release
         run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace -x :crowdinSync -x :app:crowdinSync
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           JAVA_OPTS: "-Xmx4g"
-          # 禁用 Crowdin 环境变量（防止插件通过环境变量初始化）
           CROWDIN_PROJECT_ID: ""
           CROWDIN_API_TOKEN: ""
         shell: bash
 
-      - name: 捕获编译失败日志
+      - name: 捕获失败日志
         if: failure()
         run: |
-          echo "=== 项目目录结构 ==="
-          ls -la
-          echo "=== 根目录 build.gradle 内容 ==="
-          cat build.gradle 2>/dev/null
+          echo "=== 包名提取详情 ==="
+          grep -r "namespace" "app/build.gradle.kts" 2>/dev/null
+          echo "=== app/gradle.properties 内容 ==="
+          cat "app/gradle.properties" 2>/dev/null
+          echo "=== 第 53 行前后代码 ==="
+          sed -n '45,60p' "app/build.gradle.kts" 2>/dev/null
           echo "=== Gradle 日志片段 ==="
           cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | tail -300
         shell: bash
 
-      - name: 重命名 APK（添加日期标识）
+      - name: 重命名 APK（含包名标识）
         run: |
-          find . -name "*.apk" -path "*/apk/debug/*" -exec mv {} $(dirname {})/HMA-OSS-Debug-$(date +%Y%m%d).apk \; 2>/dev/null || true
-          find . -name "*.apk" -path "*/apk/release/*" -exec mv {} $(dirname {})/HMA-OSS-Release-$(date +%Y%m%d).apk \; 2>/dev/null || true
+          # 提取包名用于 APK 命名
+          REAL_PACKAGE=$(grep -r "appPackageName" "app/gradle.properties" | sed -n 's/.*appPackageName=\(.*\)/\1/p')
+          DATE=$(date +%Y%m%d)
+          find . -name "*.apk" -path "*/apk/debug/*" -exec mv {} $(dirname {})/HMA-OSS-${REAL_PACKAGE##*.}-Debug-$DATE.apk \; 2>/dev/null || true
+          find . -name "*.apk" -path "*/apk/release/*" -exec mv {} $(dirname {})/HMA-OSS-${REAL_PACKAGE##*.}-Release-$DATE.apk \; 2>/dev/null || true
         shell: bash
 
       - name: 上传所有 APK 产物
@@ -123,7 +150,7 @@ jobs:
           path: '**/apk/**/*.apk'
           retention-days: 30
 
-      - name: 上传混淆映射文件（仅 Release 成功时）
+      - name: 上传混淆映射文件
         if: success()
         uses: actions/upload-artifact@v4
         with:
