@@ -34,7 +34,7 @@ jobs:
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
 
-      - name: 终极清理（重复注解+语法重置）
+      - name: 根治重复注解（删除所有实例）
         shell: bash
         run: |
           set +e
@@ -42,34 +42,33 @@ jobs:
           ROOT_GRADLE_KTS="build.gradle.kts"
           DEFAULT_PACKAGE="com.frknkrc44.hma"
 
-          # 1. 清理根目录：删除所有多余的 @Suppress("unused") 注解（只保留第一个，若有）
+          # 1. 核心修复：删除根目录所有 @Suppress("unused") 注解（适配所有变体）
           chmod +w "$ROOT_GRADLE_KTS" 2>/dev/null || true
-          # 统计注解出现次数，保留第一个，删除后续所有
-          SUPPRESS_COUNT=$(grep -c '@Suppress("unused")' "$ROOT_GRADLE_KTS")
-          if [ $SUPPRESS_COUNT -gt 1 ]; then
-            # 保留第一个，删除从第二个开始的所有
-            sed -i '0,/@Suppress("unused")/! s/@Suppress("unused")//g' "$ROOT_GRADLE_KTS"
-            # 去除空行（避免删除注解后留下空白行）
-            sed -i '/^$/d' "$ROOT_GRADLE_KTS"
-            echo "⚠️  清理重复注解：原数量=$SUPPRESS_COUNT → 保留1个"
-          elif [ $SUPPRESS_COUNT -eq 0 ]; then
-            echo "✅ 无重复注解，跳过清理"
+          # 匹配所有格式：@Suppress("unused")、@Suppress( "unused" )、@Suppress(\"unused\") 等
+          sed -i '/@Suppress\s*\(\s*\)"unused"\s*\)/d' "$ROOT_GRADLE_KTS"
+          # 额外匹配单引号格式：@Suppress('unused')
+          sed -i '/@Suppress\s*\(\s*\)'\'unused'\''\s*\)/d' "$ROOT_GRADLE_KTS"
+          # 清理空行（删除注解后可能产生）
+          sed -i '/^[[:space:]]*$/d' "$ROOT_GRADLE_KTS"
+          echo "✅ 已删除根目录所有 @Suppress(\"unused\") 注解"
+
+          # 2. 验证注解是否彻底删除
+          REMAINING=$(grep -c '@Suppress("unused")\|@Suppress('\''unused'\'')' "$ROOT_GRADLE_KTS")
+          if [ $REMAINING -eq 0 ]; then
+            echo "✅ 注解彻底删除，无残留"
           else
-            echo "✅ 仅1个注解，无需清理"
+            echo "⚠️  仍有 $REMAINING 个注解残留，再次强制删除"
+            sed -i '/@Suppress.*unused.*/d' "$ROOT_GRADLE_KTS"
           fi
 
-          # 2. 清理根目录：任务禁用代码（无注解，避免冲突）
+          # 3. 根目录：括号校验+任务禁用（无注解）
           sed -i '/tasks.whenTaskAdded/d' "$ROOT_GRADLE_KTS"
-          # 再次校验括号匹配（防止残留问题）
           OPEN_BRACES=$(grep -o "{" "$ROOT_GRADLE_KTS" | wc -l)
           CLOSE_BRACES=$(grep -o "}" "$ROOT_GRADLE_KTS" | wc -l)
-          if [ $CLOSE_BRACES -gt $OPEN_BRACES ]; then
-            sed -i '$!N;$!N;/}\n*$/!P;D' "$ROOT_GRADLE_KTS"
-          fi
-          # 追加无注解的任务禁用代码
+          [ $CLOSE_BRACES -gt $OPEN_BRACES ] && sed -i '$!N;$!N;/}\n*$/!P;D' "$ROOT_GRADLE_KTS"
           echo 'tasks.whenTaskAdded { if (name.lowercase().contains("crowdin")) enabled = false }' >> "$ROOT_GRADLE_KTS"
 
-          # 3. app模块：注入包名变量（无变化）
+          # 4. app模块：注入包名变量
           REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
           REAL_PACKAGE=${REAL_PACKAGE:-$DEFAULT_PACKAGE}
           chmod +w "$APP_GRADLE_KTS" 2>/dev/null || true
@@ -77,13 +76,12 @@ jobs:
           sed -i '52i \
               val appPackageName = "'"$REAL_PACKAGE"'" \
           ' "$APP_GRADLE_KTS"
-          echo "✅ app模块变量注入完成（包名：$REAL_PACKAGE）"
 
-          # 4. 最终清理Crowdin残留
+          # 5. 清理Crowdin残留
           find . -name "build.gradle*" -type f | xargs sed -i '/crowdin/d' 2>/dev/null || true
 
           set -e
-          echo "=== 重复注解清理+语法重置完成 ==="
+          echo "=== 重复注解根治完成 ==="
 
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew 2>/dev/null || true
@@ -95,7 +93,7 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: 编译（最终纯净版）
+      - name: 编译（最终无注解版）
         run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
@@ -106,12 +104,12 @@ jobs:
       - name: 捕获最终错误日志
         if: failure()
         run: |
-          echo "=== 根目录第25-30行（注解位置）==="
+          echo "=== 根目录第25-30行（原注解位置）==="
           sed -n '25,30p' "$ROOT_GRADLE_KTS" 2>/dev/null
+          echo "=== 注解残留检查 ==="
+          grep -n '@Suppress' "$ROOT_GRADLE_KTS" 2>/dev/null || echo "无 @Suppress 注解残留"
           echo "=== app模块第50-55行 ==="
           sed -n '50,55p' "$APP_GRADLE_KTS" 2>/dev/null
-          echo "=== 注解数量统计 ==="
-          grep -c '@Suppress("unused")' "$ROOT_GRADLE_KTS" 2>/dev/null
         shell: bash
 
       - name: 上传 APK 产物
