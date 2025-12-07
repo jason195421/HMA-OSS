@@ -34,61 +34,69 @@ jobs:
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
 
-      - name: 安全禁用 Crowdin（容错版）
+      - name: 彻底移除 Crowdin 插件及配置（核心修复）
         shell: bash
         run: |
           set +e
-          echo "=== 开始禁用 Crowdin 相关配置 ==="
-          
-          # 授权所有 Gradle 文件可读写
-          find . -name "build.gradle*" -type f | xargs chmod +w 2>/dev/null || echo "无 Gradle 文件需授权"
-          
-          # 查找根目录 Gradle 文件
-          ROOT_GRADLE_FILE=""
-          if [ -f "build.gradle" ]; then
-            ROOT_GRADLE_FILE="build.gradle"
-            echo "找到根目录 Gradle 文件：$ROOT_GRADLE_FILE"
-          elif [ -f "build.gradle.kts" ]; then
-            ROOT_GRADLE_FILE="build.gradle.kts"
-            echo "找到根目录 Gradle 文件：$ROOT_GRADLE_FILE"
-          else
-            echo "根目录无 Gradle 文件，跳过根目录插件注释"
-          fi
-          
-          # 注释根目录 Crowdin 插件
-          if [ -n "$ROOT_GRADLE_FILE" ]; then
-            sed -i '/id.*crowdin.*/s/^/\/\//' "$ROOT_GRADLE_FILE"
-            [ $? -eq 0 ] && echo "成功注释 $ROOT_GRADLE_FILE 中的 Crowdin 插件" || echo "警告：注释 $ROOT_GRADLE_FILE 失败，继续编译"
-          fi
-          
-          # 全局查找并注释含 Crowdin 配置的文件
+          echo "=== 彻底清理 Crowdin 相关内容 ==="
+
+          # 1. 授权所有 Gradle 文件可修改
+          find . -name "build.gradle*" -type f | xargs chmod +w 2>/dev/null || true
+
+          # 2. 彻底删除所有 Gradle 文件中的 Crowdin 插件引用（不只是注释）
           find . -name "build.gradle*" -type f | while read -r FILE; do
-            if grep -q "crowdin" "$FILE" 2>/dev/null; then
-              echo "处理含 Crowdin 配置的文件：$FILE"
-              sed -i '/crowdin {/,/}/ s/^/\/\//' "$FILE" || echo "警告：注释 $FILE 的 Crowdin 配置块失败"
-              sed -i '/implementation.*crowdin.*/s/^/\/\//' "$FILE" || echo "警告：注释 $FILE 的 Crowdin 依赖失败"
-            fi
+            # 匹配所有 Crowdin 插件 ID（常见：com.crowdin.gradle、com.crowdin.platform 等）
+            sed -i '/id.*crowdin.*/d' "$FILE"
+            # 删除 Crowdin 依赖
+            sed -i '/implementation.*crowdin.*/d' "$FILE"
+            # 删除 Crowdin 配置块
+            sed -i '/crowdin {/,/}/d' "$FILE"
+            echo "已清理 $FILE 中的 Crowdin 相关内容"
           done
-          
+
+          # 3. 删除 gradle.properties 中的 Crowdin 配置（若有）
+          if [ -f "gradle.properties" ]; then
+            sed -i '/crowdin/d' gradle.properties
+            echo "已清理 gradle.properties 中的 Crowdin 配置"
+          fi
+          if [ -f "app/gradle.properties" ]; then
+            sed -i '/crowdin/d' app/gradle.properties
+            echo "已清理 app/gradle.properties 中的 Crowdin 配置"
+          fi
+
+          # 4. 禁用所有 Crowdin 相关 Gradle 任务（强制阻止执行）
+          echo "
+          // 强制禁用 Crowdin 所有任务
+          tasks.whenTaskAdded { task ->
+              if (task.name.contains('crowdin') || task.class.name.contains('crowdin')) {
+                  task.enabled = false
+                  println('Disabled Crowdin task: ' + task.name)
+              }
+          }
+          " >> build.gradle 2>/dev/null || echo "根目录 build.gradle 不存在，跳过任务禁用"
+
           set -e
-          echo "=== Crowdin 禁用步骤完成 ==="
+          echo "=== Crowdin 清理完成 ==="
 
       - name: 授权 Gradle 执行权限
-        run: chmod +x ./gradlew 2>/dev/null || echo "gradlew 不存在，跳过授权"
+        run: chmod +x ./gradlew 2>/dev/null || true
         shell: bash
 
-      - name: 清理缓存
-        run: ./gradlew clean --no-daemon 2>/dev/null || echo "gradlew 不存在或清理失败，跳过"
+      - name: 清理缓存（排除 Crowdin 任务）
+        run: ./gradlew clean --no-daemon -x :crowdinSync -x :app:crowdinSync 2>/dev/null || true
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: 编译 Debug + Release
-        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+      - name: 编译 Debug + Release（明确排除 Crowdin 任务）
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace -x :crowdinSync -x :app:crowdinSync
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           JAVA_OPTS: "-Xmx4g"
+          # 禁用 Crowdin 环境变量（防止插件通过环境变量初始化）
+          CROWDIN_PROJECT_ID: ""
+          CROWDIN_API_TOKEN: ""
         shell: bash
 
       - name: 捕获编译失败日志
@@ -96,8 +104,10 @@ jobs:
         run: |
           echo "=== 项目目录结构 ==="
           ls -la
+          echo "=== 根目录 build.gradle 内容 ==="
+          cat build.gradle 2>/dev/null
           echo "=== Gradle 日志片段 ==="
-          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | tail -200
+          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | tail -300
         shell: bash
 
       - name: 重命名 APK（添加日期标识）
