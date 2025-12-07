@@ -33,60 +33,52 @@ jobs:
           ndk-version: 26.1.10909125
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
-- name: 安全禁用 Crowdin（容错版）
-  shell: bash
-  run: |
-    # 核心：设置脚本容错，单个命令失败不中断，同时输出详细日志
-    set +e
-    echo "=== 开始禁用 Crowdin 相关配置 ==="
 
-    # 1. 授权所有 Gradle 文件可读写（解决权限不足问题）
-    find . -name "build.gradle*" -type f | xargs chmod +w 2>/dev/null || echo "无 Gradle 文件需授权"
-
-    # 2. 查找根目录 Gradle 文件（容错处理）
-    ROOT_GRADLE_FILE=""
-    if [ -f "build.gradle" ]; then
-      ROOT_GRADLE_FILE="build.gradle"
-      echo "找到根目录 Gradle 文件：$ROOT_GRADLE_FILE"
-    elif [ -f "build.gradle.kts" ]; then
-      ROOT_GRADLE_FILE="build.gradle.kts"
-      echo "找到根目录 Gradle 文件：$ROOT_GRADLE_FILE"
-    else
-      echo "根目录无 Gradle 文件，跳过根目录插件注释"
-    fi
-
-    # 3. 注释根目录 Crowdin 插件（添加容错，失败不中断）
-    if [ -n "$ROOT_GRADLE_FILE" ]; then
-      sed -i '/id.*crowdin.*/s/^/\/\//' "$ROOT_GRADLE_FILE"
-      if [ $? -eq 0 ]; then
-        echo "成功注释 $ROOT_GRADLE_FILE 中的 Crowdin 插件"
-      else
-        echo "警告：注释 $ROOT_GRADLE_FILE 失败（可能无 Crowdin 插件），继续编译"
-      fi
-    fi
-
-    # 4. 全局查找并注释含 Crowdin 配置的文件（容错处理）
-    find . -name "build.gradle*" -type f | while read -r FILE; do
-      # 仅处理存在 crowdin 关键词的文件
-      if grep -q "crowdin" "$FILE" 2>/dev/null; then
-        echo "处理含 Crowdin 配置的文件：$FILE"
-        # 注释配置块（容错，失败不中断）
-        sed -i '/crowdin {/,/}/ s/^/\/\//' "$FILE" || echo "警告：注释 $FILE 的 Crowdin 配置块失败"
-        # 注释依赖（容错）
-        sed -i '/implementation.*crowdin.*/s/^/\/\//' "$FILE" || echo "警告：注释 $FILE 的 Crowdin 依赖失败"
-      fi
-    done
-
-    # 5. 恢复脚本严格模式，后续步骤正常校验
-    set -e
-    echo "=== Crowdin 禁用步骤完成（无论是否成功，继续编译）==="
-
+      - name: 安全禁用 Crowdin（容错版）
+        shell: bash
+        run: |
+          set +e
+          echo "=== 开始禁用 Crowdin 相关配置 ==="
+          
+          # 授权所有 Gradle 文件可读写
+          find . -name "build.gradle*" -type f | xargs chmod +w 2>/dev/null || echo "无 Gradle 文件需授权"
+          
+          # 查找根目录 Gradle 文件
+          ROOT_GRADLE_FILE=""
+          if [ -f "build.gradle" ]; then
+            ROOT_GRADLE_FILE="build.gradle"
+            echo "找到根目录 Gradle 文件：$ROOT_GRADLE_FILE"
+          elif [ -f "build.gradle.kts" ]; then
+            ROOT_GRADLE_FILE="build.gradle.kts"
+            echo "找到根目录 Gradle 文件：$ROOT_GRADLE_FILE"
+          else
+            echo "根目录无 Gradle 文件，跳过根目录插件注释"
+          fi
+          
+          # 注释根目录 Crowdin 插件
+          if [ -n "$ROOT_GRADLE_FILE" ]; then
+            sed -i '/id.*crowdin.*/s/^/\/\//' "$ROOT_GRADLE_FILE"
+            [ $? -eq 0 ] && echo "成功注释 $ROOT_GRADLE_FILE 中的 Crowdin 插件" || echo "警告：注释 $ROOT_GRADLE_FILE 失败，继续编译"
+          fi
+          
+          # 全局查找并注释含 Crowdin 配置的文件
+          find . -name "build.gradle*" -type f | while read -r FILE; do
+            if grep -q "crowdin" "$FILE" 2>/dev/null; then
+              echo "处理含 Crowdin 配置的文件：$FILE"
+              sed -i '/crowdin {/,/}/ s/^/\/\//' "$FILE" || echo "警告：注释 $FILE 的 Crowdin 配置块失败"
+              sed -i '/implementation.*crowdin.*/s/^/\/\//' "$FILE" || echo "警告：注释 $FILE 的 Crowdin 依赖失败"
+            fi
+          done
+          
+          set -e
+          echo "=== Crowdin 禁用步骤完成 ==="
 
       - name: 授权 Gradle 执行权限
-        run: chmod +x ./gradlew 2>/dev/null || true
+        run: chmod +x ./gradlew 2>/dev/null || echo "gradlew 不存在，跳过授权"
+        shell: bash
 
       - name: 清理缓存
-        run: ./gradlew clean --no-daemon 2>/dev/null || true
+        run: ./gradlew clean --no-daemon 2>/dev/null || echo "gradlew 不存在或清理失败，跳过"
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
@@ -99,23 +91,32 @@ jobs:
           JAVA_OPTS: "-Xmx4g"
         shell: bash
 
-      - name: 重命名 APK
+      - name: 捕获编译失败日志
+        if: failure()
         run: |
-          find . -name "*.apk" -path "*/apk/debug/*" -exec mv {} {}_$(date +%Y%m%d).apk \;
-          find . -name "*.apk" -path "*/apk/release/*" -exec mv {} {}_$(date +%Y%m%d).apk \;
+          echo "=== 项目目录结构 ==="
+          ls -la
+          echo "=== Gradle 日志片段 ==="
+          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | tail -200
         shell: bash
 
-      - name: 上传 APK 产物
+      - name: 重命名 APK（添加日期标识）
+        run: |
+          find . -name "*.apk" -path "*/apk/debug/*" -exec mv {} $(dirname {})/HMA-OSS-Debug-$(date +%Y%m%d).apk \; 2>/dev/null || true
+          find . -name "*.apk" -path "*/apk/release/*" -exec mv {} $(dirname {})/HMA-OSS-Release-$(date +%Y%m%d).apk \; 2>/dev/null || true
+        shell: bash
+
+      - name: 上传所有 APK 产物
         uses: actions/upload-artifact@v4
         with:
           name: HMA-OSS-APKs
-          path: '**/apk/**/*.apk'  # 单行通配符，避免序列格式
+          path: '**/apk/**/*.apk'
           retention-days: 30
 
-      - name: 上传混淆映射
+      - name: 上传混淆映射文件（仅 Release 成功时）
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: HMA-OSS-Mapping
+          name: HMA-OSS-Proguard-Mapping
           path: '**/mapping/release/mapping.txt'
           retention-days: 30
