@@ -34,54 +34,53 @@ jobs:
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
 
-      - name: 终极兜底修复（适配原代码引用方式）
+      - name: 彻底清理+重置语法（核心修复）
         shell: bash
         run: |
           set +e
-          echo "=== 兜底修复：强制全局注入appPackageName ==="
+          echo "=== 清理多余括号 + 重置语法 ==="
 
-          # 1. 核心变量
+          # 1. 处理 app/build.gradle.kts（块级变量注入，无括号问题）
           APP_GRADLE_KTS="app/build.gradle.kts"
           DEFAULT_PACKAGE="com.frknkrc44.hma"
-
-          # 2. 提取真实包名
           REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
           REAL_PACKAGE=${REAL_PACKAGE:-$DEFAULT_PACKAGE}
-          echo "最终使用包名：$REAL_PACKAGE"
 
-          # 3. 关键修复：在app/build.gradle.kts的android块内注入project.extra（原代码可能用此方式引用）
+          # 清理历史注入，重新在第52行注入（同块局部变量）
           chmod +w "$APP_GRADLE_KTS" 2>/dev/null || true
-          # 先删除所有之前插入的错误代码
-          sed -i '/val appPackageName =/d' "$APP_GRADLE_KTS"
-          sed -i '/project.extra\["appPackageName"\]/d' "$APP_GRADLE_KTS"
-          # 在android块内最顶部注入（确保作用域覆盖所有子块）
-          sed -i '/android {/a \
-              // 兜底注入appPackageName到project.extra\
-              project.extra["appPackageName"] = "'"$REAL_PACKAGE"'" \
-              // 同时定义局部变量，适配两种引用方式\
-              val appPackageName = project.extra["appPackageName"] as String\
+          sed -i '/appPackageName/d' "$APP_GRADLE_KTS" # 彻底删除所有相关行
+          sed -i '52i \
+              val appPackageName = "'"$REAL_PACKAGE"'" \
           ' "$APP_GRADLE_KTS"
+          echo "✅ app模块变量注入完成"
 
-          # 4. 修复根目录build.gradle.kts（彻底清理错误代码）
+          # 2. 修复根目录 build.gradle.kts（核心：清理多余} + 重置任务禁用）
           ROOT_GRADLE_KTS="build.gradle.kts"
           chmod +w "$ROOT_GRADLE_KTS" 2>/dev/null || true
-          # 删除所有之前追加的任务禁用代码（避免重复）
-          sed -i '/tasks.whenTaskAdded {/,/}/d' "$ROOT_GRADLE_KTS"
-          # 重新追加KTS纯语法任务禁用（无任何冗余）
-          echo '
-          tasks.whenTaskAdded {
-              if (name.contains("crowdin") || this.class.name.lowercase().contains("crowdin")) {
-                  enabled = false
-              }
-          }
-          ' >> "$ROOT_GRADLE_KTS"
 
-          # 5. 清理所有Crowdin残留
+          # 步骤1：删除所有与 tasks.whenTaskAdded 相关的代码（包括残留括号）
+          sed -i '/tasks.whenTaskAdded/d' "$ROOT_GRADLE_KTS"
+          # 步骤2：检查并删除多余的 } 符号（关键！）
+          # 原理：统计 { 和 } 的数量，若 } 多则删除最后一个多余的
+          OPEN_BRACES=$(grep -o "{" "$ROOT_GRADLE_KTS" | wc -l)
+          CLOSE_BRACES=$(grep -o "}" "$ROOT_GRADLE_KTS" | wc -l)
+          echo "根目录文件：{ 数量=$OPEN_BRACES，} 数量=$CLOSE_BRACES"
+
+          if [ $CLOSE_BRACES -gt $OPEN_BRACES ]; then
+            # 删除最后一个 }（避免破坏原有结构）
+            sed -i '$!N;$!N;/}\n*$/!P;D' "$ROOT_GRADLE_KTS"
+            echo "⚠️  删除1个多余的 }，现在 {=$OPEN_BRACES，}=$((CLOSE_BRACES-1))"
+          fi
+
+          # 步骤3：用单行无括号嵌套的方式追加任务禁用（100%无语法错误）
+          echo 'tasks.whenTaskAdded { if (name.lowercase().contains("crowdin")) enabled = false }' >> "$ROOT_GRADLE_KTS"
+          echo "✅ 根目录任务禁用代码追加完成"
+
+          # 3. 最终清理Crowdin残留
           find . -name "build.gradle*" -type f | xargs sed -i '/crowdin/d' 2>/dev/null || true
-          find . -name "gradle.properties" -type f | xargs sed -i '/crowdin/d' 2>/dev/null || true
 
           set -e
-          echo "=== 兜底修复完成 ==="
+          echo "=== 语法重置完成 ==="
 
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew 2>/dev/null || true
@@ -93,37 +92,26 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: 编译（三重属性传递兜底）
-        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace \
-          -PappPackageName=${REAL_PACKAGE} \
-          -Dorg.gradle.project.appPackageName=${REAL_PACKAGE}
+      - name: 编译（无多余参数，避免干扰）
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           JAVA_OPTS: "-Xmx4g"
-          # 环境变量兜底
-          GRADLE_OPTS: "-PappPackageName=${REAL_PACKAGE}"
         shell: bash
 
-      - name: 捕获完整错误日志
+      - name: 捕获最终错误日志
         if: failure()
         run: |
-          echo "=== app/build.gradle.kts android块内容 ==="
-          sed -n '/android {/,/}/p' "$APP_GRADLE_KTS" 2>/dev/null
-          echo "=== 第53行前后10行 ==="
-          sed -n '43,63p' "$APP_GRADLE_KTS" 2>/dev/null
-          echo "=== Gradle 完整日志 ==="
-          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | tail -500
+          echo "=== 根目录文件末尾20行（检查括号）==="
+          tail -20 "$ROOT_GRADLE_KTS" 2>/dev/null
+          echo "=== app模块第50-55行 ==="
+          sed -n '50,55p' "$APP_GRADLE_KTS" 2>/dev/null
+          echo "=== Gradle 错误日志 ==="
+          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | grep -E "error|Exception" | tail -50
         shell: bash
 
-      - name: 重命名 APK
-        run: |
-          DATE=$(date +%Y%m%d)
-          find . -name "*.apk" -path "*/apk/debug/*" -exec mv {} $(dirname {})/HMA-OSS-Debug-$DATE.apk \; 2>/dev/null || true
-          find . -name "*.apk" -path "*/apk/release/*" -exec mv {} $(dirname {})/HMA-OSS-Release-$DATE.apk \; 2>/dev/null || true
-        shell: bash
-
-      - name: 上传所有 APK 产物
+      - name: 上传 APK 产物
         uses: actions/upload-artifact@v4
         with:
           name: HMA-OSS-APKs
