@@ -34,100 +34,56 @@ jobs:
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
 
-      - name: 安全禁用 Crowdin（兼容无文件场景）
+      - name: 安全禁用 Crowdin
         shell: bash
         run: |
-          # 处理根目录 Gradle 文件
           ROOT_GRADLE_FILE=""
-          if [ -f "build.gradle" ]; then
-            ROOT_GRADLE_FILE="build.gradle"
-          elif [ -f "build.gradle.kts" ]; then
-            ROOT_GRADLE_FILE="build.gradle.kts"
-          fi
-          
+          [ -f "build.gradle" ] && ROOT_GRADLE_FILE="build.gradle"
+          [ -f "build.gradle.kts" ] && ROOT_GRADLE_FILE="build.gradle.kts"
           if [ -n "$ROOT_GRADLE_FILE" ]; then
             sed -i '/id.*crowdin.*/s/^/\/\//' "$ROOT_GRADLE_FILE"
-            echo "已注释根目录 $ROOT_GRADLE_FILE 中的 Crowdin 插件"
-          else
-            echo "根目录无 Gradle 配置文件，跳过 Crowdin 插件注释"
           fi
-
-          # 全局查找含 crowdin 配置的 Gradle 文件
           find . -name "build.gradle*" -type f | while read -r FILE; do
-            if grep -q "crowdin" "$FILE"; then
-              echo "处理含 Crowdin 配置的文件：$FILE"
+            grep -q "crowdin" "$FILE" && {
               sed -i '/crowdin {/,/}/ s/^/\/\//' "$FILE"
               sed -i '/implementation.*crowdin.*/s/^/\/\//' "$FILE"
-            fi
+            }
           done
 
       - name: 授权 Gradle 执行权限
-        run: chmod +x ./gradlew || echo "gradlew 不存在，跳过授权"
-        shell: bash
+        run: chmod +x ./gradlew 2>/dev/null || true
 
       - name: 清理缓存
-        run: |
-          if [ -f "./gradlew" ]; then
-            ./gradlew clean --no-daemon
-          else
-            echo "gradlew 不存在，跳过清理缓存"
-          fi
+        run: ./gradlew clean --no-daemon 2>/dev/null || true
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
       - name: 编译 Debug + Release
-        run: |
-          if [ -f "./gradlew" ]; then
-            ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --info --refresh-dependencies
-          else
-            echo "gradlew 不存在，尝试直接用 gradle 命令"
-            gradle assembleDebug assembleRelease --no-daemon --stacktrace --info --refresh-dependencies
-          fi
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          JAVA_OPTS: "-Xmx4g -XX:+HeapDumpOnOutOfMemoryError"
+          JAVA_OPTS: "-Xmx4g"
         shell: bash
 
-      - name: 捕获失败日志
-        if: failure()
+      - name: 重命名 APK
         run: |
-          echo "=== 项目目录结构 ==="
-          ls -la
-          echo "=== 所有 Gradle 文件 ==="
-          find . -name "build.gradle*"
-          echo "=== Gradle 日志 ==="
-          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null
+          find . -name "*.apk" -path "*/apk/debug/*" -exec mv {} {}_$(date +%Y%m%d).apk \;
+          find . -name "*.apk" -path "*/apk/release/*" -exec mv {} {}_$(date +%Y%m%d).apk \;
         shell: bash
 
-      - name: 查找并重命名 APK
-        run: |
-          find . -name "*.apk" -path "*/apk/*" | while read -r APK; do
-            DIR=$(dirname "$APK")
-            if [[ "$APK" == *"debug"* ]]; then
-              NEW_NAME="HMA-OSS-Debug-$(date +%Y%m%d).apk"
-            else
-              NEW_NAME="HMA-OSS-Release-$(date +%Y%m%d).apk"
-            fi
-            mv "$APK" "$DIR/$NEW_NAME"
-            echo "重命名 APK：$APK → $DIR/$NEW_NAME"
-          done
-        shell: bash
-
-      - name: 上传所有 APK 产物
+      - name: 上传 APK 产物
         uses: actions/upload-artifact@v4
         with:
-          name: HMA-OSS-All-APK
-          path:
-            - '**/apk/debug/*.apk'
-            - '**/apk/release/*.apk'
+          name: HMA-OSS-APKs
+          path: '**/apk/**/*.apk'  # 单行通配符，避免序列格式
           retention-days: 30
 
-      - name: 上传混淆映射文件
+      - name: 上传混淆映射
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: HMA-OSS-Proguard-Mapping
+          name: HMA-OSS-Mapping
           path: '**/mapping/release/mapping.txt'
           retention-days: 30
