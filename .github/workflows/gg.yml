@@ -38,39 +38,61 @@ jobs:
             extras;android;m2repository
             extras;google;m2repository
 
-      - name: 安全禁用 Crowdin 插件（核心修复）
+      - name: 安全禁用 Crowdin（兼容无文件场景）
         shell: bash
         run: |
-          # 1. 备份 app/build.gradle（防止修改出错）
-          cp app/build.gradle app/build.gradle.bak
-          
-          # 2. 注释根目录 build.gradle 中的 Crowdin 插件（仅匹配插件引用行）
+          # ========== 1. 处理根目录 Gradle 文件（兼容 .gradle / .gradle.kts） ==========
+          ROOT_GRADLE_FILE=""
           if [ -f "build.gradle" ]; then
-            sed -i '/id.*crowdin.*/s/^/\/\//' build.gradle
-            echo "已注释根目录 Crowdin 插件引用"
+            ROOT_GRADLE_FILE="build.gradle"
+          elif [ -f "build.gradle.kts" ]; then
+            ROOT_GRADLE_FILE="build.gradle.kts"
           fi
           
-          # 3. 注释 app/build.gradle 中的 Crowdin 配置块（安全匹配，避免删错内容）
-          if [ -f "app/build.gradle" ]; then
-            # 匹配 crowin 配置块并注释（兼容不同格式）
-            sed -i '/crowdin {/,/}/ s/^/\/\//' app/build.gradle
-            # 注释 Crowdin 依赖（如有）
-            sed -i '/implementation.*crowdin.*/s/^/\/\//' app/build.gradle
-            echo "已注释 app 模块 Crowdin 配置和依赖"
+          if [ -n "$ROOT_GRADLE_FILE" ]; then
+            # 注释 Crowdin 插件引用（兼容 Groovy/Kotlin 语法）
+            sed -i '/id.*crowdin.*/s/^/\/\//' "$ROOT_GRADLE_FILE"
+            echo "已注释根目录 $ROOT_GRADLE_FILE 中的 Crowdin 插件"
+          else
+            echo "根目录无 Gradle 配置文件，跳过 Crowdin 插件注释"
           fi
+
+          # ========== 2. 处理模块目录 Gradle 文件（先找所有模块的 build.gradle） ==========
+          # 查找所有含 crowdin 配置的 build.gradle/build.gradle.kts
+          find . -name "build.gradle*" -type f | while read -r FILE; do
+            # 仅处理包含 crowdin 配置的文件，避免无差别修改
+            if grep -q "crowdin" "$FILE"; then
+              echo "处理含 Crowdin 配置的文件：$FILE"
+              # 注释 crowdin 配置块（兼容 Groovy/Kotlin）
+              sed -i '/crowdin {/,/}/ s/^/\/\//' "$FILE"
+              # 注释 Crowdin 依赖
+              sed -i '/implementation.*crowdin.*/s/^/\/\//' "$FILE"
+            fi
+          done
 
       - name: 授权 Gradle 执行权限
-        run: chmod +x ./gradlew
+        run: chmod +x ./gradlew || echo "gradlew 不存在，跳过授权"
         shell: bash
 
-      - name: 清理缓存
-        run: ./gradlew clean --no-daemon
+      - name: 清理缓存（兼容无 gradlew 场景）
+        run: |
+          if [ -f "./gradlew" ]; then
+            ./gradlew clean --no-daemon
+          else
+            echo "gradlew 不存在，跳过清理缓存"
+          fi
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
       - name: 编译 Debug + Release
-        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --info --refresh-dependencies
+        run: |
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --info --refresh-dependencies
+          else
+            echo "gradlew 不存在，尝试直接用 gradle 命令"
+            gradle assembleDebug assembleRelease --no-daemon --stacktrace --info --refresh-dependencies
+          fi
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
@@ -80,36 +102,38 @@ jobs:
       - name: 捕获失败日志
         if: failure()
         run: |
-          echo "=== app/build.gradle 内容（排查文件损坏）==="
-          cat app/build.gradle
+          echo "=== 项目目录结构 ==="
+          ls -la
+          echo "=== 所有 Gradle 文件 ==="
+          find . -name "build.gradle*"
           echo "=== Gradle 日志 ==="
           cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null
         shell: bash
 
-      - name: 重命名 APK（添加日期）
+      - name: 查找并重命名 APK
         run: |
-          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" -print -quit)
-          if [ -n "$DEBUG_APK" ]; then
-            mv "$DEBUG_APK" "app/build/outputs/apk/debug/HMA-OSS-Debug-$(date +%Y%m%d).apk"
-          fi
-          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" -print -quit)
-          if [ -n "$RELEASE_APK" ]; then
-            mv "$RELEASE_APK" "app/build/outputs/apk/release/HMA-OSS-Release-$(date +%Y%m%d).apk"
-          fi
+          # 全局查找 APK 文件（兼容任意输出目录）
+          find . -name "*.apk" -path "*/apk/*" | while read -r APK; do
+            DIR=$(dirname "$APK")
+            FILENAME=$(basename "$APK")
+            # 区分 Debug/Release 并重命名
+            if [[ "$APK" == *"debug"* ]]; then
+              NEW_NAME="HMA-OSS-Debug-$(date +%Y%m%d).apk"
+            else
+              NEW_NAME="HMA-OSS-Release-$(date +%Y%m%d).apk"
+            fi
+            mv "$APK" "$DIR/$NEW_NAME"
+            echo "重命名 APK：$APK → $DIR/$NEW_NAME"
+          done
         shell: bash
 
-      - name: 上传 Debug APK
+      - name: 上传所有 APK 产物
         uses: actions/upload-artifact@v4
         with:
-          name: HMA-OSS-Debug-APK
-          path: app/build/outputs/apk/debug/*.apk
-          retention-days: 30
-
-      - name: 上传 Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: HMA-OSS-Release-APK
-          path: app/build/outputs/apk/release/*.apk
+          name: HMA-OSS-All-APK
+          path: |
+            **/apk/debug/*.apk
+            **/apk/release/*.apk
           retention-days: 30
 
       - name: 上传混淆映射文件
@@ -117,5 +141,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: HMA-OSS-Proguard-Mapping
-          path: app/build/outputs/mapping/release/mapping.txt
+          path: **/mapping/release/mapping.txt
           retention-days: 30
