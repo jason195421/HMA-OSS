@@ -143,3 +143,4 @@ jobs:
           name: HMA-OSS-Proguard-Mapping
           path: **/mapping/release/mapping.txt
           retention-days: 30
+  
