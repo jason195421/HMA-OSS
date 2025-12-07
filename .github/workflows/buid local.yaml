@@ -10,15 +10,17 @@ jobs:
   build-all:
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取代码
+      - name: 拉取代码（含子模块）
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           lfs: false
           submodules: true
           submodules-depth: 1
+          # 强制同步子模块（解决 common/xposed 模块缺失问题）
+          fetch-submodules: recursive
 
-      - name: 配置 JDK 17
+      - name: 配置 JDK 17（匹配 Toolchain 17）
         uses: actions/setup-java@v4
         with:
           java-version: '17'
@@ -34,44 +36,56 @@ jobs:
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
 
-      - name: 精准修复（匹配 rootProject.extra 定义）
+      - name: 根治核心问题（多模块+JVM+代码残留）
         shell: bash
         run: |
           set +e
           APP_GRADLE_KTS="app/build.gradle.kts"
           ROOT_GRADLE_KTS="build.gradle.kts"
-          # 从 app 模块提取真实包名（namespace）
+
+          # 1. 提取真实包名（从 app 模块 namespace）
           REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
           REAL_PACKAGE=${REAL_PACKAGE:-"com.frknkrc44.hma"}
-          echo "✅ 提取真实包名：$REAL_PACKAGE"
+          echo "✅ 真实包名：$REAL_PACKAGE"
 
-          # 1. 根项目：注入 rootProject.extra 属性（完全匹配代码引用）
+          # 2. 根项目：注入 rootProject.extra（完全匹配代码）
           chmod +w "$ROOT_GRADLE_KTS" 2>/dev/null || true
-          # 先删除之前可能的错误注入
           sed -i '/rootProject.extra {/,/}/d' "$ROOT_GRADLE_KTS"
-          # 注入所有需要的属性（放在文件开头，确保全局生效）
           sed -i '1i \
-          // 注入 rootProject.extra 属性，供 app 模块访问\
           rootProject.extra { \
               set("appPackageName", "'"$REAL_PACKAGE"'") \
-              set("crowdinProjectId", "") // CI 构建无需真实 ID，设为空\
-              set("crowdinApiKey", "")    // CI 构建无需真实密钥，设为空\
-              set("localBuild", true)     // 跳过 Crowdin API 调用\
-              set("officialBuild", false) // 非官方构建\
+              set("crowdinProjectId", "") \
+              set("crowdinApiKey", "") \
+              set("localBuild", true) \
+              set("officialBuild", false) \
           }\
           ' "$ROOT_GRADLE_KTS"
-          echo "✅ 已在根项目定义 rootProject.extra 属性"
 
-          # 2. app 模块：删除 Crowdin API 调用逻辑（避免空密钥报错）
+          # 3. app 模块：彻底清理 Crowdin 相关代码（避免残留语法）
           chmod +w "$APP_GRADLE_KTS" 2>/dev/null || true
-          # 删除第55-83行的 Crowdin API 调用（从 URL 定义到 translatorsMap 写入）
-          sed -i '/URL("https:\/\/crowdin.com\/api\/v2\/projects\/"),/,/File(srcDir, "translators.json").writeText(translatorJson)/d' "$APP_GRADLE_KTS"
-          # 清理残留的空行
+          # 精准删除 Crowdin API 调用块（含 if 条件）
+          sed -i '/if (localBuild || officialBuild) {/,/}/d' "$APP_GRADLE_KTS"
+          # 删除 translatorsMap 定义（无 API 调用则无用）
+          sed -i '/val translatorsMap = mutableMapOf(/,/)/d' "$APP_GRADLE_KTS"
+          # 清理空行和多余导入
           sed -i '/^[[:space:]]*$/d' "$APP_GRADLE_KTS"
-          echo "✅ 已删除 app 模块的 Crowdin API 调用逻辑"
+          sed -i '/import org.jose4j.json.internal.json_simple.JSONObject/d' "$APP_GRADLE_KTS"
+          sed -i '/import java.io.DataInputStream/d' "$APP_GRADLE_KTS"
+          sed -i '/import java.net.HttpURLConnection/d' "$APP_GRADLE_KTS"
+          sed -i '/import java.net.URL/d' "$APP_GRADLE_KTS"
 
-          # 3. 根项目：清理重复注解和多余括号（最终保障）
-          sed -i '/@Suppress("unused")\|@Suppress('\''unused'\'')/d' "$ROOT_GRADLE_KTS"
+          # 4. 修复 JVM Toolchain 版本不兼容（JDK 17 → Toolchain 17）
+          sed -i 's/jvmToolchain(21)/jvmToolchain(17)/g' "$APP_GRADLE_KTS"
+          echo "✅ 已将 Kotlin JVM Toolchain 从 21 改为 17（匹配 JDK 17）"
+
+          # 5. 验证子模块存在（common/xposed）
+          echo "=== 项目模块结构 ==="
+          ls -la || true
+          ls -la common/ 2>/dev/null || echo "⚠️ common 模块缺失"
+          ls -la xposed/ 2>/dev/null || echo "⚠️ xposed 模块缺失"
+
+          # 6. 根项目：最终语法清理
+          sed -i '/@Suppress/d' "$ROOT_GRADLE_KTS"
           sed -i '/tasks.whenTaskAdded/d' "$ROOT_GRADLE_KTS"
           OPEN_BRACES=$(grep -o "{" "$ROOT_GRADLE_KTS" | wc -l)
           CLOSE_BRACES=$(grep -o "}" "$ROOT_GRADLE_KTS" | wc -l)
@@ -79,7 +93,7 @@ jobs:
           echo 'tasks.whenTaskAdded { if (name.lowercase().contains("crowdin")) enabled = false }' >> "$ROOT_GRADLE_KTS"
 
           set -e
-          echo "=== 所有根源问题修复完成 ==="
+          echo "=== 所有问题修复完成 ==="
 
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew 2>/dev/null || true
@@ -91,8 +105,8 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: 编译（最终匹配版）
-        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --debug
+      - name: 编译（带依赖校验）
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --info
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
@@ -102,12 +116,12 @@ jobs:
       - name: 捕获最终错误日志
         if: failure()
         run: |
-          echo "=== 根项目 rootProject.extra 定义 ==="
-          sed -n '1,10p' "$ROOT_GRADLE_KTS" 2>/dev/null
-          echo "=== app 模块属性引用行 ==="
-          sed -n '35,45p' "$APP_GRADLE_KTS" 2>/dev/null
-          echo "=== Gradle 错误日志 ==="
-          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | grep -E "error|Exception" | tail -50
+          echo "=== 子模块详情 ==="
+          git submodule status || true
+          echo "=== 依赖错误详情 ==="
+          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | grep -E "could not find|missing|unsatisfied|Toolchain" | tail -50
+          echo "=== app 模块最终代码片段 ==="
+          sed -n '30,60p' "$APP_GRADLE_KTS" 2>/dev/null
         shell: bash
 
       - name: 上传 APK 产物
