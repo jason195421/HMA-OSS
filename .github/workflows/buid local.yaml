@@ -33,22 +33,54 @@ jobs:
           ndk-version: 26.1.10909125
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
+- name: 安全禁用 Crowdin（容错版）
+  shell: bash
+  run: |
+    # 核心：设置脚本容错，单个命令失败不中断，同时输出详细日志
+    set +e
+    echo "=== 开始禁用 Crowdin 相关配置 ==="
 
-      - name: 安全禁用 Crowdin
-        shell: bash
-        run: |
-          ROOT_GRADLE_FILE=""
-          [ -f "build.gradle" ] && ROOT_GRADLE_FILE="build.gradle"
-          [ -f "build.gradle.kts" ] && ROOT_GRADLE_FILE="build.gradle.kts"
-          if [ -n "$ROOT_GRADLE_FILE" ]; then
-            sed -i '/id.*crowdin.*/s/^/\/\//' "$ROOT_GRADLE_FILE"
-          fi
-          find . -name "build.gradle*" -type f | while read -r FILE; do
-            grep -q "crowdin" "$FILE" && {
-              sed -i '/crowdin {/,/}/ s/^/\/\//' "$FILE"
-              sed -i '/implementation.*crowdin.*/s/^/\/\//' "$FILE"
-            }
-          done
+    # 1. 授权所有 Gradle 文件可读写（解决权限不足问题）
+    find . -name "build.gradle*" -type f | xargs chmod +w 2>/dev/null || echo "无 Gradle 文件需授权"
+
+    # 2. 查找根目录 Gradle 文件（容错处理）
+    ROOT_GRADLE_FILE=""
+    if [ -f "build.gradle" ]; then
+      ROOT_GRADLE_FILE="build.gradle"
+      echo "找到根目录 Gradle 文件：$ROOT_GRADLE_FILE"
+    elif [ -f "build.gradle.kts" ]; then
+      ROOT_GRADLE_FILE="build.gradle.kts"
+      echo "找到根目录 Gradle 文件：$ROOT_GRADLE_FILE"
+    else
+      echo "根目录无 Gradle 文件，跳过根目录插件注释"
+    fi
+
+    # 3. 注释根目录 Crowdin 插件（添加容错，失败不中断）
+    if [ -n "$ROOT_GRADLE_FILE" ]; then
+      sed -i '/id.*crowdin.*/s/^/\/\//' "$ROOT_GRADLE_FILE"
+      if [ $? -eq 0 ]; then
+        echo "成功注释 $ROOT_GRADLE_FILE 中的 Crowdin 插件"
+      else
+        echo "警告：注释 $ROOT_GRADLE_FILE 失败（可能无 Crowdin 插件），继续编译"
+      fi
+    fi
+
+    # 4. 全局查找并注释含 Crowdin 配置的文件（容错处理）
+    find . -name "build.gradle*" -type f | while read -r FILE; do
+      # 仅处理存在 crowdin 关键词的文件
+      if grep -q "crowdin" "$FILE" 2>/dev/null; then
+        echo "处理含 Crowdin 配置的文件：$FILE"
+        # 注释配置块（容错，失败不中断）
+        sed -i '/crowdin {/,/}/ s/^/\/\//' "$FILE" || echo "警告：注释 $FILE 的 Crowdin 配置块失败"
+        # 注释依赖（容错）
+        sed -i '/implementation.*crowdin.*/s/^/\/\//' "$FILE" || echo "警告：注释 $FILE 的 Crowdin 依赖失败"
+      fi
+    done
+
+    # 5. 恢复脚本严格模式，后续步骤正常校验
+    set -e
+    echo "=== Crowdin 禁用步骤完成（无论是否成功，继续编译）==="
+
 
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew 2>/dev/null || true
