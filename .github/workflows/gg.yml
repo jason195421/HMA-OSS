@@ -32,16 +32,12 @@ jobs:
           build-tools: 34.0.0
           ndk-version: 26.1.10909125
           cmake-version: 3.22.1
-          components: |
-            platform-tools
-            tools
-            extras;android;m2repository
-            extras;google;m2repository
+          components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
 
       - name: 安全禁用 Crowdin（兼容无文件场景）
         shell: bash
         run: |
-          # ========== 1. 处理根目录 Gradle 文件（兼容 .gradle / .gradle.kts） ==========
+          # 处理根目录 Gradle 文件
           ROOT_GRADLE_FILE=""
           if [ -f "build.gradle" ]; then
             ROOT_GRADLE_FILE="build.gradle"
@@ -50,22 +46,17 @@ jobs:
           fi
           
           if [ -n "$ROOT_GRADLE_FILE" ]; then
-            # 注释 Crowdin 插件引用（兼容 Groovy/Kotlin 语法）
             sed -i '/id.*crowdin.*/s/^/\/\//' "$ROOT_GRADLE_FILE"
             echo "已注释根目录 $ROOT_GRADLE_FILE 中的 Crowdin 插件"
           else
             echo "根目录无 Gradle 配置文件，跳过 Crowdin 插件注释"
           fi
 
-          # ========== 2. 处理模块目录 Gradle 文件（先找所有模块的 build.gradle） ==========
-          # 查找所有含 crowdin 配置的 build.gradle/build.gradle.kts
+          # 全局查找含 crowdin 配置的 Gradle 文件
           find . -name "build.gradle*" -type f | while read -r FILE; do
-            # 仅处理包含 crowdin 配置的文件，避免无差别修改
             if grep -q "crowdin" "$FILE"; then
               echo "处理含 Crowdin 配置的文件：$FILE"
-              # 注释 crowdin 配置块（兼容 Groovy/Kotlin）
               sed -i '/crowdin {/,/}/ s/^/\/\//' "$FILE"
-              # 注释 Crowdin 依赖
               sed -i '/implementation.*crowdin.*/s/^/\/\//' "$FILE"
             fi
           done
@@ -74,7 +65,7 @@ jobs:
         run: chmod +x ./gradlew || echo "gradlew 不存在，跳过授权"
         shell: bash
 
-      - name: 清理缓存（兼容无 gradlew 场景）
+      - name: 清理缓存
         run: |
           if [ -f "./gradlew" ]; then
             ./gradlew clean --no-daemon
@@ -112,11 +103,8 @@ jobs:
 
       - name: 查找并重命名 APK
         run: |
-          # 全局查找 APK 文件（兼容任意输出目录）
           find . -name "*.apk" -path "*/apk/*" | while read -r APK; do
             DIR=$(dirname "$APK")
-            FILENAME=$(basename "$APK")
-            # 区分 Debug/Release 并重命名
             if [[ "$APK" == *"debug"* ]]; then
               NEW_NAME="HMA-OSS-Debug-$(date +%Y%m%d).apk"
             else
@@ -131,9 +119,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: HMA-OSS-All-APK
-          path: |
-            **/apk/debug/*.apk
-            **/apk/release/*.apk
+          path:
+            - '**/apk/debug/*.apk'
+            - '**/apk/release/*.apk'
           retention-days: 30
 
       - name: 上传混淆映射文件
@@ -141,6 +129,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: HMA-OSS-Proguard-Mapping
-          path: **/mapping/release/mapping.txt
+          path: '**/mapping/release/mapping.txt'
           retention-days: 30
-  
