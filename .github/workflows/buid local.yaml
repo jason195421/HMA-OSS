@@ -92,7 +92,7 @@ jobs:
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
       - name: 编译（最终匹配版）
-        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --debug
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
