@@ -4,7 +4,7 @@ on:
     branches: [ master ]
   pull_request:
     branches: [ master ]
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build-all:
@@ -15,7 +15,7 @@ jobs:
         with:
           fetch-depth: 1
           lfs: false
-          submodules: true # 关键：项目可能含子模块（如 xposed 依赖），必须拉取
+          submodules: true
           submodules-depth: 1
 
       - name: 配置 JDK 17
@@ -23,72 +23,75 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle # 缓存 Gradle 依赖，加速编译
+          cache: gradle
 
-      - name: 配置 Android SDK（补充原生依赖）
+      - name: 配置 Android SDK
         uses: android-actions/setup-android@v3
         with:
           api-level: 34
           build-tools: 34.0.0
           ndk-version: 26.1.10909125
-          cmake-version: 3.22.1 # 关键：原生代码编译依赖 CMake，匹配 NDK 26 版本
-          # 安装必要组件（避免缺失 SDK 包）
+          cmake-version: 3.22.1
           components: |
             platform-tools
             tools
             extras;android;m2repository
             extras;google;m2repository
 
+      - name: 禁用 Crowdin 翻译插件（核心修复）
+        shell: bash
+        run: |
+          # 1. 注释掉根目录 build.gradle 中的 Crowdin 插件引用
+          if [ -f "build.gradle" ]; then
+            sed -i '/crowdin/d' build.gradle
+            echo "已注释根目录 build.gradle 中的 Crowdin 插件"
+          fi
+          # 2. 注释掉 app 模块 build.gradle 中的 Crowdin 配置
+          if [ -f "app/build.gradle" ]; then
+            sed -i '/crowdin {/,/}/d' app/build.gradle
+            echo "已删除 app/build.gradle 中的 Crowdin 配置块"
+          fi
+          # 3. 禁用 Crowdin 相关 Gradle 任务（避免任务依赖失败）
+          echo "tasks.withType(org.crowdin.gradle.CrowdinTask) { enabled = false }" >> app/build.gradle
+
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew
         shell: bash
 
-      - name: 清理 Gradle 缓存（解决缓存 corruption）
+      - name: 清理缓存
         run: ./gradlew clean --no-daemon
-        shell: bash
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: 编译 Debug + Release（增强日志 + 强制刷新依赖）
+      - name: 编译 Debug + Release（详细日志）
         run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --info --refresh-dependencies
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          # 增加内存限制，避免 OOM 导致编译失败
           JAVA_OPTS: "-Xmx4g -XX:+HeapDumpOnOutOfMemoryError"
         shell: bash
 
-      - name: 捕获编译失败日志（便于排查）
+      - name: 捕获失败日志
         if: failure()
         run: |
-          echo "=== Gradle 构建日志 ==="
+          echo "=== Gradle 日志 ==="
           cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null
-          echo "=== Android SDK 安装组件 ==="
+          echo "=== SDK 已安装组件 ==="
           sdkmanager --list_installed
         shell: bash
 
-      - name: 验证并上传 Debug APK
-        if: success() || failure() # 即使 Release 失败，也保留 Debug 产物
+      - name: 重命名 APK（添加日期）
         run: |
+          # Debug 重命名
           DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" -print -quit)
           if [ -n "$DEBUG_APK" ]; then
-            echo "Debug APK 生成成功：$DEBUG_APK"
             mv "$DEBUG_APK" "app/build/outputs/apk/debug/HMA-OSS-Debug-$(date +%Y%m%d).apk"
-          else
-            echo "Debug APK 未生成"
           fi
-        shell: bash
-
-      - name: 验证并上传 Release APK
-        if: success() || failure()
-        run: |
+          # Release 重命名
           RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" -print -quit)
           if [ -n "$RELEASE_APK" ]; then
-            echo "Release APK 生成成功：$RELEASE_APK"
             mv "$RELEASE_APK" "app/build/outputs/apk/release/HMA-OSS-Release-$(date +%Y%m%d).apk"
-          else
-            echo "Release APK 未生成"
           fi
         shell: bash
 
@@ -106,7 +109,7 @@ jobs:
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      - name: 上传混淆映射文件（仅 Release）
+      - name: 上传混淆映射文件
         if: success()
         uses: actions/upload-artifact@v4
         with:
