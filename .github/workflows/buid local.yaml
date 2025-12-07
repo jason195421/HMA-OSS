@@ -34,46 +34,58 @@ jobs:
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
 
-      - name: 暴力修复 appPackageName（第53行前直接插入）
+      - name: 彻底修复语法错误 + 包名属性定义
         shell: bash
         run: |
           set +e
-          echo "=== 直接在第53行前插入属性定义 ==="
+          echo "=== 修复KTS语法错误 + 定义appPackageName ==="
 
-          # 1. 授权文件可修改
-          chmod +w app/build.gradle.kts 2>/dev/null || true
-
-          # 2. 提取真实包名（优先）或用默认值
+          # 1. 核心变量定义
           APP_GRADLE_KTS="app/build.gradle.kts"
+          ROOT_GRADLE_KTS="build.gradle.kts"
           DEFAULT_PACKAGE="com.frknkrc44.hma"
+
+          # 2. 提取真实包名
           REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
           REAL_PACKAGE=${REAL_PACKAGE:-$DEFAULT_PACKAGE}
           echo "使用包名：$REAL_PACKAGE"
 
-          # 3. 核心操作：在第53行前插入属性定义（KTS语法，明确project作用域）
-          # 用sed在第53行前添加2行：先定义属性，再换行
+          # 3. 修复app/build.gradle.kts：第53行前插入属性（KTS正确语法）
+          chmod +w "$APP_GRADLE_KTS" 2>/dev/null || true
+          # 先删除之前可能插入的错误代码（避免重复）
+          sed -i '/val appPackageName = project.extra/d' "$APP_GRADLE_KTS"
+          sed -i '/project.extra\["appPackageName"\] =/d' "$APP_GRADLE_KTS"
+          # 第53行前插入局部变量（直接供该行使用，无需extra）
           sed -i '53i \
-          val appPackageName = project.extra["appPackageName"] as String = "'"$REAL_PACKAGE"'" \
+          val appPackageName = "'"$REAL_PACKAGE"'" \
           ' "$APP_GRADLE_KTS"
-
-          # 4. 同时在文件开头添加全局属性（双重保障）
-          sed -i '1i \
-          // 全局定义appPackageName属性，供全文件访问\
-          project.extra["appPackageName"] = "'"$REAL_PACKAGE"'" \
-          ' "$APP_GRADLE_KTS"
-
-          # 5. 验证插入结果（关键：确认属性已插入）
-          echo "=== 验证第50-55行内容 ==="
+          # 验证插入结果
+          echo "=== 第50-55行内容 ==="
           sed -n '50,55p' "$APP_GRADLE_KTS" 2>/dev/null
-          echo "=== 验证文件开头属性 ==="
-          sed -n '1,5p' "$APP_GRADLE_KTS" 2>/dev/null
 
-          # 6. 彻底清理Crowdin（避免干扰）
+          # 4. 修复root/build.gradle.kts：移除错误的任务禁用代码，添加KTS正确语法
+          chmod +w "$ROOT_GRADLE_KTS" 2>/dev/null || true
+          # 删除之前追加的错误代码（重复@Suppress + className）
+          sed -i '/tasks.whenTaskAdded {/,/}/d' "$ROOT_GRADLE_KTS"
+          sed -i '/@Suppress("unused")/d' "$ROOT_GRADLE_KTS"
+          # 追加KTS正确的任务禁用代码（用task.class.name，避免className）
+          echo '
+          // KTS语法：禁用Crowdin相关任务
+          tasks.whenTaskAdded {
+              if (name.contains("crowdin") || this.class.name.contains("crowdin")) {
+                  enabled = false
+                  println("Disabled Crowdin task: $name")
+              }
+          }
+          ' >> "$ROOT_GRADLE_KTS"
+          echo "=== 已修复根目录Gradle任务禁用语法 ==="
+
+          # 5. 彻底清理所有Crowdin相关配置
           find . -name "build.gradle*" -type f | xargs sed -i '/crowdin/d' 2>/dev/null || true
           find . -name "gradle.properties" -type f | xargs sed -i '/crowdin/d' 2>/dev/null || true
 
           set -e
-          echo "=== 属性插入完成 ==="
+          echo "=== 语法修复 + 属性定义完成 ==="
 
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew 2>/dev/null || true
@@ -85,23 +97,23 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: 编译 Debug + Release（强制指定属性）
+      - name: 编译 Debug + Release（KTS语法兼容）
         run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace -PappPackageName=${REAL_PACKAGE}
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           JAVA_OPTS: "-Xmx4g"
-          # 环境变量传递属性（三重保障）
-          APP_PACKAGE_NAME: "${REAL_PACKAGE}"
         shell: bash
 
-      - name: 捕获失败日志（完整文件内容）
+      - name: 捕获失败日志
         if: failure()
         run: |
-          echo "=== app/build.gradle.kts 完整内容 ==="
-          cat "$APP_GRADLE_KTS" 2>/dev/null
-          echo "=== Gradle 日志完整片段 ==="
-          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | tail -500
+          echo "=== 根目录build.gradle.kts 末尾内容 ==="
+          tail -20 "$ROOT_GRADLE_KTS" 2>/dev/null
+          echo "=== app/build.gradle.kts 第50-60行 ==="
+          sed -n '50,60p' "$APP_GRADLE_KTS" 2>/dev/null
+          echo "=== Gradle 日志片段 ==="
+          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | tail -300
         shell: bash
 
       - name: 重命名 APK
