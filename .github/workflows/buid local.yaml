@@ -34,54 +34,52 @@ jobs:
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
 
-      - name: 根治重复注解（删除所有实例）
+      - name: 精准修复（匹配 rootProject.extra 定义）
         shell: bash
         run: |
           set +e
           APP_GRADLE_KTS="app/build.gradle.kts"
           ROOT_GRADLE_KTS="build.gradle.kts"
-          DEFAULT_PACKAGE="com.frknkrc44.hma"
+          # 从 app 模块提取真实包名（namespace）
+          REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
+          REAL_PACKAGE=${REAL_PACKAGE:-"com.frknkrc44.hma"}
+          echo "✅ 提取真实包名：$REAL_PACKAGE"
 
-          # 1. 核心修复：删除根目录所有 @Suppress("unused") 注解（适配所有变体）
+          # 1. 根项目：注入 rootProject.extra 属性（完全匹配代码引用）
           chmod +w "$ROOT_GRADLE_KTS" 2>/dev/null || true
-          # 匹配所有格式：@Suppress("unused")、@Suppress( "unused" )、@Suppress(\"unused\") 等
-          sed -i '/@Suppress\s*\(\s*\)"unused"\s*\)/d' "$ROOT_GRADLE_KTS"
-          # 额外匹配单引号格式：@Suppress('unused')
-          sed -i '/@Suppress\s*\(\s*\)'\'unused'\''\s*\)/d' "$ROOT_GRADLE_KTS"
-          # 清理空行（删除注解后可能产生）
-          sed -i '/^[[:space:]]*$/d' "$ROOT_GRADLE_KTS"
-          echo "✅ 已删除根目录所有 @Suppress(\"unused\") 注解"
+          # 先删除之前可能的错误注入
+          sed -i '/rootProject.extra {/,/}/d' "$ROOT_GRADLE_KTS"
+          # 注入所有需要的属性（放在文件开头，确保全局生效）
+          sed -i '1i \
+          // 注入 rootProject.extra 属性，供 app 模块访问\
+          rootProject.extra { \
+              set("appPackageName", "'"$REAL_PACKAGE"'") \
+              set("crowdinProjectId", "") // CI 构建无需真实 ID，设为空\
+              set("crowdinApiKey", "")    // CI 构建无需真实密钥，设为空\
+              set("localBuild", true)     // 跳过 Crowdin API 调用\
+              set("officialBuild", false) // 非官方构建\
+          }\
+          ' "$ROOT_GRADLE_KTS"
+          echo "✅ 已在根项目定义 rootProject.extra 属性"
 
-          # 2. 验证注解是否彻底删除
-          REMAINING=$(grep -c '@Suppress("unused")\|@Suppress('\''unused'\'')' "$ROOT_GRADLE_KTS")
-          if [ $REMAINING -eq 0 ]; then
-            echo "✅ 注解彻底删除，无残留"
-          else
-            echo "⚠️  仍有 $REMAINING 个注解残留，再次强制删除"
-            sed -i '/@Suppress.*unused.*/d' "$ROOT_GRADLE_KTS"
-          fi
+          # 2. app 模块：删除 Crowdin API 调用逻辑（避免空密钥报错）
+          chmod +w "$APP_GRADLE_KTS" 2>/dev/null || true
+          # 删除第55-83行的 Crowdin API 调用（从 URL 定义到 translatorsMap 写入）
+          sed -i '/URL("https:\/\/crowdin.com\/api\/v2\/projects\/"),/,/File(srcDir, "translators.json").writeText(translatorJson)/d' "$APP_GRADLE_KTS"
+          # 清理残留的空行
+          sed -i '/^[[:space:]]*$/d' "$APP_GRADLE_KTS"
+          echo "✅ 已删除 app 模块的 Crowdin API 调用逻辑"
 
-          # 3. 根目录：括号校验+任务禁用（无注解）
+          # 3. 根项目：清理重复注解和多余括号（最终保障）
+          sed -i '/@Suppress("unused")\|@Suppress('\''unused'\'')/d' "$ROOT_GRADLE_KTS"
           sed -i '/tasks.whenTaskAdded/d' "$ROOT_GRADLE_KTS"
           OPEN_BRACES=$(grep -o "{" "$ROOT_GRADLE_KTS" | wc -l)
           CLOSE_BRACES=$(grep -o "}" "$ROOT_GRADLE_KTS" | wc -l)
           [ $CLOSE_BRACES -gt $OPEN_BRACES ] && sed -i '$!N;$!N;/}\n*$/!P;D' "$ROOT_GRADLE_KTS"
           echo 'tasks.whenTaskAdded { if (name.lowercase().contains("crowdin")) enabled = false }' >> "$ROOT_GRADLE_KTS"
 
-          # 4. app模块：注入包名变量
-          REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
-          REAL_PACKAGE=${REAL_PACKAGE:-$DEFAULT_PACKAGE}
-          chmod +w "$APP_GRADLE_KTS" 2>/dev/null || true
-          sed -i '/appPackageName/d' "$APP_GRADLE_KTS"
-          sed -i '52i \
-              val appPackageName = "'"$REAL_PACKAGE"'" \
-          ' "$APP_GRADLE_KTS"
-
-          # 5. 清理Crowdin残留
-          find . -name "build.gradle*" -type f | xargs sed -i '/crowdin/d' 2>/dev/null || true
-
           set -e
-          echo "=== 重复注解根治完成 ==="
+          echo "=== 所有根源问题修复完成 ==="
 
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew 2>/dev/null || true
@@ -93,7 +91,7 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: 编译（最终无注解版）
+      - name: 编译（最终匹配版）
         run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
@@ -104,12 +102,12 @@ jobs:
       - name: 捕获最终错误日志
         if: failure()
         run: |
-          echo "=== 根目录第25-30行（原注解位置）==="
-          sed -n '25,30p' "$ROOT_GRADLE_KTS" 2>/dev/null
-          echo "=== 注解残留检查 ==="
-          grep -n '@Suppress' "$ROOT_GRADLE_KTS" 2>/dev/null || echo "无 @Suppress 注解残留"
-          echo "=== app模块第50-55行 ==="
-          sed -n '50,55p' "$APP_GRADLE_KTS" 2>/dev/null
+          echo "=== 根项目 rootProject.extra 定义 ==="
+          sed -n '1,10p' "$ROOT_GRADLE_KTS" 2>/dev/null
+          echo "=== app 模块属性引用行 ==="
+          sed -n '35,45p' "$APP_GRADLE_KTS" 2>/dev/null
+          echo "=== Gradle 错误日志 ==="
+          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | grep -E "error|Exception" | tail -50
         shell: bash
 
       - name: 上传 APK 产物
