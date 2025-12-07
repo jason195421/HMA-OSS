@@ -29,19 +29,32 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 0
 
-      - name: 清理 Crowdin 代码 + 注入必要属性（核心修复）
+      - name: 核心修复+子模块配置校验（决胜版）
         shell: bash
         run: |
           set +e
           APP_GRADLE_KTS="app/build.gradle.kts"
           ROOT_GRADLE_KTS="build.gradle.kts"
+          SETTINGS_GRADLE_KTS="settings.gradle.kts"
 
-          # 1. 提取 app 模块真实包名（从 namespace）
+          # 1. 校验并修复 settings.gradle.kts（确保子模块被识别）
+          chmod +w "$SETTINGS_GRADLE_KTS" 2>/dev/null || true
+          # 检查是否包含子模块配置，缺失则添加
+          if ! grep -q 'include(":common")' "$SETTINGS_GRADLE_KTS"; then
+            echo 'include(":common")' >> "$SETTINGS_GRADLE_KTS"
+            echo "⚠️  已添加 common 模块到 settings.gradle.kts"
+          fi
+          if ! grep -q 'include(":xposed")' "$SETTINGS_GRADLE_KTS"; then
+            echo 'include(":xposed")' >> "$SETTINGS_GRADLE_KTS"
+            echo "⚠️  已添加 xposed 模块到 settings.gradle.kts"
+          fi
+          # 验证子模块路径（若子模块在子目录，需指定projectDir）
+          echo "=== settings.gradle.kts 内容 ==="
+          cat "$SETTINGS_GRADLE_KTS" 2>/dev/null
+
+          # 2. 提取包名+注入属性（保留之前的正确修复）
           REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
           REAL_PACKAGE=${REAL_PACKAGE:-"com.frknkrc44.hma"}
-          echo "✅ 提取包名：$REAL_PACKAGE"
-
-          # 2. 根项目注入 rootProject.extra（匹配代码引用）
           chmod +w "$ROOT_GRADLE_KTS" 2>/dev/null || true
           sed -i '/rootProject.extra {/,/}/d' "$ROOT_GRADLE_KTS"
           sed -i '1i \
@@ -54,32 +67,26 @@ jobs:
           }\
           ' "$ROOT_GRADLE_KTS"
 
-          # 3. 清理 app 模块 Crowdin 残留代码
-          chmod +w "$APP_GRADLE_KTS" 2>/dev/null || true
-          # 删除 Crowdin API 调用块
-          sed -i '/if (localBuild || officialBuild) {/,/}/d' "$APP_GRADLE_KTS"
-          # 删除无用的 translatorsMap 和导入
-          sed -i '/val translatorsMap = mutableMapOf(/,/)/d' "$APP_GRADLE_KTS"
-          sed -i '/import org.jose4j.json.internal.json_simple.JSONObject/d' "$APP_GRADLE_KTS"
-          sed -i '/import java.io.DataInputStream/d' "$APP_GRADLE_KTS"
-          sed -i '/import java.net.HttpURLConnection/d' "$APP_GRADLE_KTS"
-          sed -i '/import java.net.URL/d' "$APP_GRADLE_KTS"
-          # 同步 JVM Toolchain 为 21（匹配你的 JDK 21 配置）
-          sed -i 's/jvmToolchain(17)/jvmToolchain(21)/g' "$APP_GRADLE_KTS" 2>/dev/null
-          # 清理空行
-          sed -i '/^[[:space:]]*$/d' "$APP_GRADLE_KTS"
-
-          # 4. 子模块 Toolchain 同步为 21（避免版本冲突）
-          for MODULE in common xposed; do
+          # 3. 清理所有模块的 Crowdin 残留（包括子模块）
+          for MODULE in app common xposed; do
             MODULE_GRADLE="$MODULE/build.gradle.kts"
             if [ -f "$MODULE_GRADLE" ]; then
+              chmod +w "$MODULE_GRADLE" 2>/dev/null || true
+              sed -i '/crowdin/d' "$MODULE_GRADLE"
+              sed -i '/URL(/d; /HttpURLConnection/d; /DataInputStream/d' "$MODULE_GRADLE"
               sed -i 's/jvmToolchain(17)/jvmToolchain(21)/g' "$MODULE_GRADLE" 2>/dev/null
-              echo "✅ 同步 $MODULE 模块 Toolchain 为 21"
+              echo "✅ 清理 $MODULE 模块 Crowdin 残留"
             fi
           done
 
+          # 4. 验证子模块目录结构
+          echo "=== 项目完整目录结构 ==="
+          find . -maxdepth 2 -type d | grep -E "(app|common|xposed)"
+          echo "=== app 模块依赖配置 ==="
+          grep -n "implementation(projects." "$APP_GRADLE_KTS" 2>/dev/null
+
           set -e
-          echo "=== 修复完成 ==="
+          echo "=== 所有修复+校验完成 ==="
 
       - name: Gradle wrapper validation
         uses: gradle/wrapper-validation-action@v3
@@ -101,33 +108,49 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle') }}
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/settings.gradle.kts') }}
           restore-keys: ${{ runner.os }}-gradle-
 
-      - name: Gradle prebuild
+      - name: Gradle prebuild（指定子模块先编译）
         run: |
-          ./gradlew prebuild
+          ./gradlew :common:prebuild :xposed:prebuild :app:prebuild --no-daemon --info
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          JAVA_OPTS: "-Xmx4g"
 
-      - name: Build all
+      - name: Build all（精准指定任务，避免歧义）
         id: buildAll
         run: |
-          ./gradlew assemble --no-daemon --stacktrace
-          echo "releaseName=$(ls app/build/outputs/apk/release/*.apk | awk -F '(/|.apk)' '{print $6}')" >> $GITHUB_OUTPUT
-          echo "debugName=$(ls app/build/outputs/apk/debug/*.apk | awk -F '(/|.apk)' '{print $6}')" >> $GITHUB_OUTPUT
-          echo "releaseFile=$(ls app/build/outputs/apk/release/*.apk)" >> $GITHUB_OUTPUT
-          echo "debugFile=$(ls app/build/outputs/apk/debug/*.apk)" >> $GITHUB_OUTPUT
-          echo "ossNum=$(ls app/build/outputs/apk/debug/*.apk | awk -F '(/|.apk)' '{print $6}' | cut -f4 -d'-')" >> $GITHUB_OUTPUT
+          # 明确指定 Debug/Release 任务，替代模糊的 assemble
+          ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace --info
+          # 提取 APK 路径（兼容不同输出结构）
+          RELEASE_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          DEBUG_FILE=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
+          echo "releaseName=$(basename "$RELEASE_FILE")" >> $GITHUB_OUTPUT
+          echo "debugName=$(basename "$DEBUG_FILE")" >> $GITHUB_OUTPUT
+          echo "releaseFile=$RELEASE_FILE" >> $GITHUB_OUTPUT
+          echo "debugFile=$DEBUG_FILE" >> $GITHUB_OUTPUT
+          echo "ossNum=$(basename "$DEBUG_FILE" | awk -F '-' '{print $4}' | sed 's/.apk//')" >> $GITHUB_OUTPUT
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          JAVA_OPTS: "-Xmx4g"
 
-      - name: 捕获编译失败日志（排障用）
+      - name: 终极排障日志（失败必看）
         if: failure()
         run: |
-          echo "=== 子模块状态 ==="
-          git submodule status --recursive
-          echo "=== Gradle 错误日志 ==="
-          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E "error|Exception|could not find" | tail -100
+          echo "=== 子模块识别状态 ==="
+          ./gradlew projects --no-daemon | grep -E "(Root project|Project ':common'|Project ':xposed')"
+          echo "=== 可用任务列表（app模块）==="
+          ./gradlew :app:tasks --no-daemon | grep -E "assemble|build"
+          echo "=== 子模块编译日志（common）==="
+          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E ":common:.*(error|fail)" | tail -50
+          echo "=== 子模块编译日志（xposed）==="
+          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E ":xposed:.*(error|fail)" | tail -50
+          echo "=== 依赖冲突日志 ==="
+          cat ~/.gradle/daemon/21.0.0/daemon-*.out.log 2>/dev/null | grep -E "conflict|duplicate" | tail -50
 
       - name: Upload Release APK
-        if: success()
+        if: success() && steps.buildAll.outputs.releaseFile != ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.buildAll.outputs.releaseName }}
@@ -135,7 +158,7 @@ jobs:
           retention-days: 30
 
       - name: Upload Debug APK
-        if: success()
+        if: success() && steps.buildAll.outputs.debugFile != ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.buildAll.outputs.debugName }}
