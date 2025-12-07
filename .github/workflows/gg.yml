@@ -38,21 +38,26 @@ jobs:
             extras;android;m2repository
             extras;google;m2repository
 
-      - name: 禁用 Crowdin 翻译插件（核心修复）
+      - name: 安全禁用 Crowdin 插件（核心修复）
         shell: bash
         run: |
-          # 1. 注释掉根目录 build.gradle 中的 Crowdin 插件引用
+          # 1. 备份 app/build.gradle（防止修改出错）
+          cp app/build.gradle app/build.gradle.bak
+          
+          # 2. 注释根目录 build.gradle 中的 Crowdin 插件（仅匹配插件引用行）
           if [ -f "build.gradle" ]; then
-            sed -i '/crowdin/d' build.gradle
-            echo "已注释根目录 build.gradle 中的 Crowdin 插件"
+            sed -i '/id.*crowdin.*/s/^/\/\//' build.gradle
+            echo "已注释根目录 Crowdin 插件引用"
           fi
-          # 2. 注释掉 app 模块 build.gradle 中的 Crowdin 配置
+          
+          # 3. 注释 app/build.gradle 中的 Crowdin 配置块（安全匹配，避免删错内容）
           if [ -f "app/build.gradle" ]; then
-            sed -i '/crowdin {/,/}/d' app/build.gradle
-            echo "已删除 app/build.gradle 中的 Crowdin 配置块"
+            # 匹配 crowin 配置块并注释（兼容不同格式）
+            sed -i '/crowdin {/,/}/ s/^/\/\//' app/build.gradle
+            # 注释 Crowdin 依赖（如有）
+            sed -i '/implementation.*crowdin.*/s/^/\/\//' app/build.gradle
+            echo "已注释 app 模块 Crowdin 配置和依赖"
           fi
-          # 3. 禁用 Crowdin 相关 Gradle 任务（避免任务依赖失败）
-          echo "tasks.withType(org.crowdin.gradle.CrowdinTask) { enabled = false }" >> app/build.gradle
 
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew
@@ -64,7 +69,7 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: 编译 Debug + Release（详细日志）
+      - name: 编译 Debug + Release
         run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace --info --refresh-dependencies
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
@@ -75,20 +80,18 @@ jobs:
       - name: 捕获失败日志
         if: failure()
         run: |
+          echo "=== app/build.gradle 内容（排查文件损坏）==="
+          cat app/build.gradle
           echo "=== Gradle 日志 ==="
           cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null
-          echo "=== SDK 已安装组件 ==="
-          sdkmanager --list_installed
         shell: bash
 
       - name: 重命名 APK（添加日期）
         run: |
-          # Debug 重命名
           DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" -print -quit)
           if [ -n "$DEBUG_APK" ]; then
             mv "$DEBUG_APK" "app/build/outputs/apk/debug/HMA-OSS-Debug-$(date +%Y%m%d).apk"
           fi
-          # Release 重命名
           RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" -print -quit)
           if [ -n "$RELEASE_APK" ]; then
             mv "$RELEASE_APK" "app/build/outputs/apk/release/HMA-OSS-Release-$(date +%Y%m%d).apk"
