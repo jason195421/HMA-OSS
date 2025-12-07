@@ -1,12 +1,13 @@
-name: 编译并签名 HMA-OSS
+name: 编译 HMA-OSS（Debug + Release）
 on:
   push:
     branches: [ master ]
   pull_request:
     branches: [ master ]
+  workflow_dispatch: # 允许手动触发
 
 jobs:
-  build-signed:
+  build-all:
     runs-on: ubuntu-latest
     steps:
       - name: 拉取代码
@@ -34,96 +35,52 @@ jobs:
         run: chmod +x ./gradlew
         shell: bash
 
-      - name: 校验 Secrets 并解码签名文件（终极修复）
-        shell: bash
-        run: |
-          # ========== 关键：不依赖 Secrets 中的文件名，直接硬编码固定路径（避免为空） ==========
-          KEYSTORE_FILE="hma-release-key.jks"
-          KEYSTORE_PATH="$PWD/$KEYSTORE_FILE"
-
-          # 1. 校验核心 Secrets（只保留必要项，减少配置错误）
-          if [ -z "${{ secrets.KEY_ALIAS }}" ]; then echo "错误：Secrets KEY_ALIAS 未配置"; exit 1; fi
-          if [ -z "${{ secrets.STORE_PASSWORD }}" ]; then echo "错误：Secrets STORE_PASSWORD 未配置"; exit 1; fi
-          if [ -z "${{ secrets.KEY_PASSWORD }}" ]; then echo "错误：Secrets KEY_PASSWORD 未配置"; exit 1; fi
-          if [ -z "${{ secrets.KEYSTORE_BASE64 }}" ]; then echo "错误：Secrets KEYSTORE_BASE64 未配置"; exit 1; fi
-
-          # 2. 调试输出（便于排查）
-          echo "签名文件路径：$KEYSTORE_PATH"
-          echo "Base64 编码长度：${#${{ secrets.KEYSTORE_BASE64 }}}"
-
-          # 3. Base64 解码（容错参数：忽略无效字符，避免复制时的多余空格/换行）
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d --ignore-garbage > "$KEYSTORE_PATH" || {
-            echo "Base64 解码失败！请按以下步骤重新生成编码："
-            echo "1. 本地执行：base64 -w 0 my-release-key.jks > keystore.base64"
-            echo "2. 复制 keystore.base64 全文到 Secrets KEYSTORE_BASE64"
-            exit 1
-          }
-
-          # 4. 验证签名文件有效性（双重校验）
-          if [ ! -f "$KEYSTORE_PATH" ]; then echo "错误：签名文件未生成"; exit 1; fi
-          FILE_SIZE=$(stat -c%s "$KEYSTORE_PATH")
-          if [ $FILE_SIZE -lt 500 ]; then echo "错误：签名文件过小（正常 .jks 文件应 > 1KB）"; exit 1; fi
-          echo "签名文件生成成功，大小：$FILE_SIZE 字节"
-
-          # 5. 写入签名配置到 app/gradle.properties（若文件不存在则创建）
-          mkdir -p app  # 确保 app 目录存在
-          echo "MYAPP_UPLOAD_STORE_FILE=$KEYSTORE_FILE" > app/gradle.properties
-          echo "MYAPP_UPLOAD_KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> app/gradle.properties
-          echo "MYAPP_UPLOAD_STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}" >> app/gradle.properties
-          echo "MYAPP_UPLOAD_KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> app/gradle.properties
-          echo "签名配置已写入 app/gradle.properties"
-
-      - name: 配置 app/build.gradle 签名（临时注入，无需修改项目代码）
-        shell: bash
-        run: |
-          # 向 app/build.gradle 末尾添加签名配置（避免用户手动修改）
-          cat >> app/build.gradle << 'EOF'
-          android {
-              signingConfigs {
-                  release {
-                      if (project.hasProperty('MYAPP_UPLOAD_STORE_FILE')) {
-                          storeFile file(MYAPP_UPLOAD_STORE_FILE)
-                          storePassword MYAPP_UPLOAD_STORE_PASSWORD
-                          keyAlias MYAPP_UPLOAD_KEY_ALIAS
-                          keyPassword MYAPP_UPLOAD_KEY_PASSWORD
-                      }
-                  }
-              }
-              buildTypes {
-                  release {
-                      signingConfig signingConfigs.release
-                      minifyEnabled true
-                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-                  }
-              }
-          }
-          EOF
-          echo "已临时注入签名配置到 app/build.gradle"
-
-      - name: 编译并签名 Release 版本
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
+      - name: 同时编译 Debug + Release 版本
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
         shell: bash
 
-      - name: 验证 APK 产物
+      - name: 验证 Debug APK 产物
         run: |
-          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" -print -quit)
-          if [ -z "$APK_FILE" ]; then echo "错误：APK 未生成"; exit 1; fi
-          echo "APK 生成成功：$APK_FILE"
-          echo "APK 大小：$(stat -c%s "$APK_FILE") 字节"
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" -print -quit)
+          if [ -z "$DEBUG_APK" ]; then
+            echo "错误：Debug APK 未生成"
+            exit 1
+          fi
+          echo "Debug APK 生成成功：$DEBUG_APK"
+          echo "Debug APK 大小：$(stat -c%s "$DEBUG_APK") 字节"
+        shell: bash
 
-      - name: 上传签名 APK
+      - name: 验证 Release APK 产物
+        run: |
+          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" -print -quit)
+          if [ -z "$RELEASE_APK" ]; then
+            echo "错误：Release APK 未生成"
+            exit 1
+          fi
+          echo "Release APK 生成成功：$RELEASE_APK"
+          echo "Release APK 大小：$(stat -c%s "$RELEASE_APK") 字节"
+        shell: bash
+
+      - name: 上传 Debug APK（无混淆，便于调试）
         uses: actions/upload-artifact@v4
         with:
-          name: HMA-OSS-Signed-APK
+          name: HMA-OSS-Debug-APK
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: 上传 Release APK（有混淆，体积更小）
+        uses: actions/upload-artifact@v4
+        with:
+          name: HMA-OSS-Release-APK
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      - name: 上传映射文件
+      - name: 上传 Release 混淆映射文件（用于崩溃分析）
         uses: actions/upload-artifact@v4
         with:
-          name: HMA-OSS-Mapping
+          name: HMA-OSS-Proguard-Mapping
           path: app/build/outputs/mapping/release/mapping.txt
           retention-days: 30
