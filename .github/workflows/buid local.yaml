@@ -34,53 +34,43 @@ jobs:
           cmake-version: 3.22.1
           components: platform-tools,tools,extras;android;m2repository,extras;google;m2repository
 
-      - name: 彻底清理+重置语法（核心修复）
+      - name: 彻底清理+语法修复
         shell: bash
         run: |
           set +e
-          echo "=== 清理多余括号 + 重置语法 ==="
-
-          # 1. 处理 app/build.gradle.kts（块级变量注入，无括号问题）
           APP_GRADLE_KTS="app/build.gradle.kts"
+          ROOT_GRADLE_KTS="build.gradle.kts"
           DEFAULT_PACKAGE="com.frknkrc44.hma"
+          
+          # 1. app模块：注入包名变量
           REAL_PACKAGE=$(grep -r "namespace" "$APP_GRADLE_KTS" | sed -n 's/.*namespace\s*["'\'']\([^"'\'']*\)["'\''].*/\1/p' | head -1)
           REAL_PACKAGE=${REAL_PACKAGE:-$DEFAULT_PACKAGE}
-
-          # 清理历史注入，重新在第52行注入（同块局部变量）
           chmod +w "$APP_GRADLE_KTS" 2>/dev/null || true
-          sed -i '/appPackageName/d' "$APP_GRADLE_KTS" # 彻底删除所有相关行
+          sed -i '/appPackageName/d' "$APP_GRADLE_KTS"
           sed -i '52i \
               val appPackageName = "'"$REAL_PACKAGE"'" \
           ' "$APP_GRADLE_KTS"
-          echo "✅ app模块变量注入完成"
+          echo "✅ app模块变量注入完成（包名：$REAL_PACKAGE）"
 
-          # 2. 修复根目录 build.gradle.kts（核心：清理多余} + 重置任务禁用）
-          ROOT_GRADLE_KTS="build.gradle.kts"
+          # 2. 根目录：清理多余括号+追加任务禁用
           chmod +w "$ROOT_GRADLE_KTS" 2>/dev/null || true
-
-          # 步骤1：删除所有与 tasks.whenTaskAdded 相关的代码（包括残留括号）
           sed -i '/tasks.whenTaskAdded/d' "$ROOT_GRADLE_KTS"
-          # 步骤2：检查并删除多余的 } 符号（关键！）
-          # 原理：统计 { 和 } 的数量，若 } 多则删除最后一个多余的
+          # 括号数量校验与清理
           OPEN_BRACES=$(grep -o "{" "$ROOT_GRADLE_KTS" | wc -l)
           CLOSE_BRACES=$(grep -o "}" "$ROOT_GRADLE_KTS" | wc -l)
-          echo "根目录文件：{ 数量=$OPEN_BRACES，} 数量=$CLOSE_BRACES"
-
           if [ $CLOSE_BRACES -gt $OPEN_BRACES ]; then
-            # 删除最后一个 }（避免破坏原有结构）
             sed -i '$!N;$!N;/}\n*$/!P;D' "$ROOT_GRADLE_KTS"
-            echo "⚠️  删除1个多余的 }，现在 {=$OPEN_BRACES，}=$((CLOSE_BRACES-1))"
+            echo "⚠️  清理多余括号：{=$OPEN_BRACES → }=$((CLOSE_BRACES-1))"
           fi
-
-          # 步骤3：用单行无括号嵌套的方式追加任务禁用（100%无语法错误）
+          # 单行追加任务禁用（无语法错误）
           echo 'tasks.whenTaskAdded { if (name.lowercase().contains("crowdin")) enabled = false }' >> "$ROOT_GRADLE_KTS"
-          echo "✅ 根目录任务禁用代码追加完成"
+          echo "✅ 根目录配置修复完成"
 
-          # 3. 最终清理Crowdin残留
+          # 3. 清理Crowdin残留
           find . -name "build.gradle*" -type f | xargs sed -i '/crowdin/d' 2>/dev/null || true
 
           set -e
-          echo "=== 语法重置完成 ==="
+          echo "=== 所有修复完成 ==="
 
       - name: 授权 Gradle 执行权限
         run: chmod +x ./gradlew 2>/dev/null || true
@@ -92,23 +82,23 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: 编译（无多余参数，避免干扰）
+      - name: 编译（删除错误的 GRADLE_OPTS）
         run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          JAVA_OPTS: "-Xmx4g"
+          JAVA_OPTS: "-Xmx4g" # 仅保留 JVM 必要参数，删除 GRADLE_OPTS
         shell: bash
 
       - name: 捕获最终错误日志
         if: failure()
         run: |
-          echo "=== 根目录文件末尾20行（检查括号）==="
+          echo "=== 根目录文件末尾20行 ==="
           tail -20 "$ROOT_GRADLE_KTS" 2>/dev/null
           echo "=== app模块第50-55行 ==="
           sed -n '50,55p' "$APP_GRADLE_KTS" 2>/dev/null
-          echo "=== Gradle 错误日志 ==="
-          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | grep -E "error|Exception" | tail -50
+          echo "=== JVM/Gradle 错误日志 ==="
+          cat ~/.gradle/daemon/17.0/daemon-*.out.log 2>/dev/null | grep -E "error|Exception|Unrecognized" | tail -50
         shell: bash
 
       - name: 上传 APK 产物
